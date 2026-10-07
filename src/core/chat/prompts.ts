@@ -65,14 +65,25 @@ ${STYLE_GUIDE}
 
 How to answer:
 1. Lead with the direct answer in one or two sentences. Then give the detail that justifies it.
-2. Ground every factual claim in the provided code excerpts. Cite as [path:startLine-endLine] immediately after the claim.
-   Only cite files and line ranges that appear in the excerpts below. Never invent a path or a line number.
+2. Ground every factual claim in the provided code excerpts and investigation results. Cite as
+   [path:startLine-endLine] immediately after the claim. Only cite files and line ranges that appear in the material
+   below. Never invent a path or a line number.
 3. If the excerpts do not contain the answer, say so plainly. Name the files or directories the reader should look at next
    and why. Do not guess and present it as fact.
 4. When code is the clearest explanation, include a short excerpt (under ~15 lines) in a fenced block and explain it.
 5. If the question touches a trade-off or a risk (coupling, missing tests, unclear ownership, operational cost), say so —
    that is exactly what this reader needs to know.
+   Testing is measured, not guessed: coverage here means a test reaches the file through the import or call graph. Say
+   "no test reaches this" rather than "this is untested", and never claim something is tested without the coverage
+   numbers to support it.
 6. Keep answers under roughly 400 words unless the question genuinely demands more.
+6b. For anything about running, deploying, configuring or verifying the system, use what the repository actually
+   states — CI definitions, Dockerfiles, compose files, infrastructure manifests and scripts — rather than what the
+   dependency list suggests; the operational surface section below has this. If there is no CI, say there is no CI;
+   that absence is worth knowing and is not the same thing as "I did not look".
+6c. For ownership, change risk or blast radius, use the coupling and ownership section below (or the change_coupling
+   tool). Two files that repeatedly change together in different components are a dependency the import graph does not
+   show. Give the confidence and the commit count rather than calling something coupled on the strength of one commit.
 7. Use the exact names the excerpts use. Never swap in a more familiar product for the one that is really there
    (OpenSearch is not Elasticsearch, MariaDB is not MySQL). If a name is not in the excerpts, do not assert it.
 
@@ -89,6 +100,11 @@ export interface ChatPromptInput {
   retrieved: string;
   history: LlmMessage[];
   question: string;
+  /**
+   * Tool observations gathered by the investigation phase. Empty when the
+   * question was answered from the retrieved excerpts alone.
+   */
+  observations?: string[];
 }
 
 export function buildChatMessages(input: ChatPromptInput): LlmMessage[] {
@@ -106,8 +122,25 @@ export function buildChatMessages(input: ChatPromptInput): LlmMessage[] {
 
   messages.push({
     role: 'user',
-    content: `Relevant code retrieved for this question:\n\n${input.retrieved || '(no relevant code found)'}\n\n---\n\nQuestion: ${input.question}`,
+    content: `Relevant code retrieved for this question:\n\n${input.retrieved || '(no relevant code found)'}`,
   });
+
+  // Evidence the agent went and fetched. It is labelled separately from the
+  // keyword results because it answers follow-up questions that a keyword
+  // search could not have reached — who calls this, what happens on failure.
+  const observations = input.observations ?? [];
+  if (observations.length > 0) {
+    messages.push({ role: 'assistant', content: 'Understood. I will check whether that is enough to answer.' });
+    messages.push({
+      role: 'user',
+      content:
+        `You investigated the repository and these are the results, in the order you gathered them. Together with the ` +
+        `excerpts above, this is everything you know:\n\n${observations.join('\n\n')}\n\n---\n\n` +
+        `Answer the question using this material, and cite the files it came from.\n\nQuestion: ${input.question}`,
+    });
+  } else {
+    messages.push({ role: 'user', content: `---\n\nQuestion: ${input.question}` });
+  }
   return messages;
 }
 
@@ -275,9 +308,36 @@ ${toolCatalogue()}
 6. Five quiz questions, medium difficulty — they should require understanding the substance, not trivia or gotchas.
 7. The "tldr" must stand alone: if the reader reads only that, they should still be able to hold a sensible conversation about this subject.
 8. When your budget is nearly spent, stop investigating and write the explainer with what you have.
-9. Use names exactly as the tool output gives them. Never substitute a more familiar product for the one that
+9. Say what is verified and what is not. The digest carries measured test coverage (which files a test reaches through
+   the import and call graph, and which have the most churn without one). Use the test_coverage tool when testing matters to
+   the subject. "A test reaches this" and "nothing tests this" are different claims from "this is correct"; make the
+   first two, never the third.
+10. Use names exactly as the tool output gives them. Never substitute a more familiar product for the one that
    is actually there — if the code says OpenSearch, do not write Elasticsearch; if it says MariaDB, do not write
-   MySQL. Never name a technology that did not appear in a tool observation. This applies to the quiz too.`;
+   MySQL. Never name a technology that did not appear in a tool observation. This applies to the quiz too.
+11. For how the system runs, ships or is verified, use what the repository states — the operational_surface tool
+   reads CI definitions, Dockerfiles, compose files, infrastructure manifests, scripts and declared environment
+   variables. Never infer a deployment target or a test command from a dependency name. If a thing is absent (no CI,
+   no container, no tests), say it is absent: an absence the reader can rely on is a finding.
+12. Do not describe code as complex because it is long. Complexity here means measured decision points and control-flow
+   nesting (find_complexity, and the complexity section of the digest); size alone is not evidence. When you call
+   something convoluted or risky to change, cite the decision-point count, the nesting depth or the caller count.
+13. When you say something is inconsistent, unconventional or a violation, name the convention and how many places
+   follow it — list_conventions gives the rule as this repository actually behaves, with its exceptions. A single file
+   doing something differently is not evidence of a convention, and a convention is a description of the code, not a
+   judgement that the exception is wrong.
+14. For questions about what the system stores, how entities relate, or what an API accepts and returns, use the
+   data_model tool and the data model section of the digest. Read the shape from the schema that declares it rather
+   than inferring it from usage, and if a database is used with no table definitions in the repository, say the schema
+   lives elsewhere rather than describing tables that were never found.
+15. Do not invent an absence and do not soften one you found. find_gaps records what the repository does not state,
+   each entry derived from a fact that was measured, and the digest carries the same list. Report an absence as an
+   observation with its evidence ("no test reaches this file", "no CI definition was found"), never as a defect or a
+   security judgement — the team may have a good reason, and you do not know it.
+16. For questions about change risk, blast radius, ownership or what a change will drag in, use change_coupling.
+   Files that change together in different components are dependencies the import graph does not show, and a component
+   whose history comes from one person is a maintenance risk. Quote the confidence and commit counts; do not describe a
+   pair as coupled from a single shared commit.`;
 }
 
 export function agentUserPrompt(task: AgentTaskLike): string {

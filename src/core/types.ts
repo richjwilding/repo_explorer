@@ -1,3 +1,10 @@
+import type { ComplexityReport } from './analysis/complexity.js';
+import type { ConventionsReport } from './analysis/conventions.js';
+import type { DataModelReport } from './analysis/contracts.js';
+import type { GapsReport } from './analysis/gaps.js';
+import type { CouplingInfo } from './analysis/coupling.js';
+import type { OperationalSurface } from './analysis/ops.js';
+import type { TestCoverage } from './analysis/tests.js';
 /**
  * Core domain model for Repo Explorer.
  *
@@ -116,7 +123,7 @@ export interface SymbolRecord {
   entry: boolean;
 }
 
-export type CallKind = 'call' | 'method' | 'constructor' | 'callback';
+export type CallKind = 'call' | 'method' | 'constructor' | 'callback' | 'jsx';
 
 export interface CallEdge {
   /** Symbol id of the caller, or `entry:<path>` when outside any tracked symbol. */
@@ -159,6 +166,15 @@ export interface Hotspot {
   score: number;
   commits: number;
   loc: number;
+  /** Decision points summed across the file's definitions. */
+  branches: number;
+  /** Deepest control-flow nesting in the file. */
+  maxDepth: number;
+  /**
+   * False when the file has no function bodies to measure — a churned config or
+   * stylesheet — in which case it is ranked by size and the reader is told.
+   */
+  measured: boolean;
   components: string[];
 }
 
@@ -406,6 +422,20 @@ export interface RepoModel {
   deadCode: DeadCodeCandidate[];
   /** Churn × size ranking across the repository. */
   hotspots: Hotspot[];
+  /** Which source files the tests actually reach. */
+  tests: TestCoverage;
+  /** How the project is built, verified, shipped and run. */
+  ops: OperationalSurface;
+  /** Which files change together, and who owns what — read from git history. */
+  coupling: CouplingInfo;
+  /** Measured nesting and decision points, rather than size as a proxy. */
+  complexity: ComplexityReport;
+  /** Conventions inferred from the code, and the places that break them. */
+  conventions: ConventionsReport;
+  /** The shape of the data: tables, models, enums and API definitions. */
+  dataModel: DataModelReport;
+  /** What the repository does not state about itself. */
+  gaps: GapsReport;
   /** First ~120 lines of README, if present. */
   readme: string | null;
   docs: { path: string; title: string; excerpt: string }[];

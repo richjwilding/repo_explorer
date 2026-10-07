@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChatSession, Citation } from '../../core/types';
+import type { AgentStep } from '../../core/agent/explorer';
 import { api, query, streamPost } from '../lib/api';
 import { Markdown } from '../lib/markdown';
 import { relativeTime, shortPath } from '../lib/format';
@@ -8,6 +9,8 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   citations?: Citation[];
+  /** Evidence the agent went and fetched before answering. */
+  steps?: AgentStep[];
   streaming?: boolean;
 }
 
@@ -98,6 +101,16 @@ export function ChatPanel({ repoId, providerLabel, seedQuestion, onSeedConsumed,
               const next = [...previous];
               const last = next[next.length - 1];
               if (last && last.role === 'assistant') next[next.length - 1] = { ...last, content: assistantText, streaming: true };
+              return next;
+            });
+          } else if (event.type === 'step') {
+            const step = event.step as AgentStep;
+            setMessages((previous) => {
+              const next = [...previous];
+              const last = next[next.length - 1];
+              if (last && last.role === 'assistant') {
+                next[next.length - 1] = { ...last, steps: [...(last.steps ?? []), step] };
+              }
               return next;
             });
           } else if (event.type === 'status') {
@@ -230,6 +243,21 @@ export function ChatPanel({ repoId, providerLabel, seedQuestion, onSeedConsumed,
                     {busy ? ` · ${elapsed}s` : ''}
                   </p>
                 )}
+                {message.steps && message.steps.length > 0 ? (
+                  <details className="chat-steps" open={message.streaming === true}>
+                    <summary>
+                      Investigated with {message.steps.length} tool {message.steps.length === 1 ? 'call' : 'calls'}
+                    </summary>
+                    <ol>
+                      {message.steps.map((step, stepIndex) => (
+                        <li key={stepIndex} className={step.failed ? 'muted' : undefined}>
+                          <code>{step.tool}</code> {step.summary}
+                          {step.thought ? <span className="muted"> — {step.thought}</span> : null}
+                        </li>
+                      ))}
+                    </ol>
+                  </details>
+                ) : null}
                 {message.citations && message.citations.length > 0 ? (
                   <div className="citations">
                     <span className="citations-label">Sources</span>

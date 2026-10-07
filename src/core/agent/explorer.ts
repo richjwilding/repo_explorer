@@ -71,7 +71,7 @@ function missingSectionTypes(scope: string, explainer: Explainer): ExplainerSect
   return required.filter((type) => !present.has(type));
 }
 
-interface ExtractedAction {
+export interface ExtractedAction {
   thought?: string;
   tool: string;
   args: Record<string, unknown>;
@@ -95,7 +95,7 @@ function asArgs(value: unknown): Record<string, unknown> {
  * `{"list_dir": {…}}`. All of them mean the same thing; rejecting them wastes a
  * whole turn of a slow local model.
  */
-function extractAction(value: Record<string, unknown>, knownTools: Set<string>): ExtractedAction | null {
+export function extractAction(value: Record<string, unknown>, knownTools: Set<string>): ExtractedAction | null {
   const thought = typeof value.thought === 'string' ? value.thought : typeof value.reasoning === 'string' ? value.reasoning : undefined;
 
   const fromNameAndArgs = (name: unknown, args: unknown, fallbackArgs?: unknown): ExtractedAction | null => {

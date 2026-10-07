@@ -97,6 +97,45 @@ with total confidence — which then propagated into generated explainers and qu
 
 Dependencies now come from four kinds of evidence, in descending order of authority:
 
+| Failure mode | What went wrong | What prevents it |
+| --- | --- | --- |
+| An absence claimed in a dimension the project does not have | "No migrations" is meaningless for a repository with no database | Every check returns null when it does not apply, so only real absences are reported |
+| A fixed window reading the next handler | A 40-line window from a route handler ran into the following route's error handling, so a handler with none of its own looked handled | The window ends at the next handler in the same file |
+| A weak finding dressed as a strong one | "No observability library" fires for a library or a script, which has no production output to look at | The check requires something actually deployed — a container, infrastructure, or routes |
+| A verdict instead of an observation | "This code has no tests" reads as a criticism, and the reader cannot tell which facts it rests on | Every finding carries its evidence and is phrased as what is absent and why it might matter |
+
+| --- | --- | --- |
+| A column type swallowing its own constraints | `id BIGSERIAL PRIMARY KEY` reported the type as "BIGSERIAL PRIMARY KEY" | A SQL type stops at the first constraint keyword |
+| A flag contradicting the note beside it | A primary key column was marked optional because its line omitted `NOT NULL`, while still being labelled "nullable" | Primary key columns are forced non-null and the contradictory note is cleared |
+| A test fixture presented as deployed storage | A repository whose tests mention `postgres://` and `amqp://` was reported as using PostgreSQL and AMQP | A store named only in tests or fixtures is listed separately, the same rule already applied to environment variables |
+| Every line number one too high | Parsers added one to the declaration's line, so a field on line 2 was reported at line 3 | The body capture begins with the newline after `{`, so its first element is the declaration's own line |
+
+| --- | --- | --- |
+| A helper counted as a test that broke the naming convention | Every file under `tests/` was treated as a test, so `tests/helpers/fixtureRepo.ts` produced a false exception | Only files that declare test cases define the placement and naming conventions; `testCaseFiles` is passed in |
+| An exception message naming the wrong component | The back-edge violation said a file imported the component it belongs to | The message names `depends`, the component the file imports, rather than `dependency`, the one it sits in |
+| A weak majority promoted to a rule | 71% adherence would have been stated as a convention and used to flag the remaining 29% | Rules need 80% adherence and five supporting cases; anything between 50% and 80% is reported as a deliberately mixed pattern with no rule to break |
+| A generic rule asserted at a repository | A rule stated from general practice would be wrong in any codebase that chose differently | Every rule is derived from the measured majority behaviour of the repository being analysed |
+
+| --- | --- | --- |
+| A keyword in a string counted as a branch | `"if you want, for the while case"` is prose, not five decisions | `stripNonCode` replaces comment and string contents before anything is counted |
+| An indented object literal counted as nesting | A nested config object looked as deep as nested branches | A brace opens a level only when preceded by a control head or a function head |
+| The function's own body counted as a level | Every definition was reported one deeper than it was, and disagreed with the indentation measure used for Python | The first brace outside parentheses is the frame; and a destructured parameter is inside parentheses, so it is skipped |
+| A callback body hidden by an unclosed parenthesis | `items.map((x) => { ... })` still has the call's parenthesis open, so the whole callback body was treated as a parameter list and reported at depth 0 | The parenthesis guard applies only before the body opens, which raised the measured depth of most React components |
+| Two incomparable scores in one ranking | A 4,531-line lockfile outranked the branchiest function in the codebase, because size×churn and complexity×churn are different scales | Measured files are ranked on complexity and come first; unmeasured ones follow, labelled "by size" |
+
+| --- | --- | --- |
+| A hub file presented as a hidden dependency | A file that changes in every commit co-occurs with everything, so its pairs have perfect confidence and would dominate the list | Files changed in more than ~40% of commits are excluded, with an absolute floor so short histories are not filtered to nothing |
+| A merge read as coupling | A merge or whole-repo reformat touches every file, coupling all of them | Commits touching more than 40 files are skipped, counted, and disclosed to the reader |
+| One shared commit read as a relationship | Two files edited together once is a coincidence | A minimum co-occurrence scaled to the length of history, plus a confidence floor |
+| A single-author repository flagged as key-person risk everywhere | Every component in a one-person project has one author, which is a fact about the project, not about any component | Key-person risk requires more than one author, at least ten commits, and an 80% share |
+
+| --- | --- | --- |
+| A dependency's name standing in for its deployment | Five OpenSearch containers plus an app that never ships a container looked the same from the dependency list | `ops.ts` reads CI, Dockerfiles, compose and infrastructure manifests; `describeOperations` never infers a target from a package name |
+| An empty panel read as a broken feature | A repository with no CI showed nothing, which is indistinguishable from an analysis that failed | Every absence is stated: "no CI definitions found — nothing automatically verifies a change" |
+| A `COPY` destination mistaken for a source | `COPY package.json ./` ends in `./`, so the manifest copy looked like the source tree and every correctly cached Dockerfile was reported as uncached | `copySources()` drops the destination operand; caching is judged by manifest-before-source order across the build |
+| Fixture configuration presented as production configuration | A `DATABASE_URL` used only by a test fixture appeared alongside real settings | `EnvVar.testOnly` is derived from a segment-aware path test, and test-only names are demoted and counted separately |
+| A test file mistaken for a source file about tests | A loose substring match on `test` treated `src/core/analysis/tests.ts` as a test path | `isTestOrFixturePath` matches whole path segments and filename conventions |
+
 | Evidence | Source | Example identifier |
 | --- | --- | --- |
 | Container images | `docker-compose*`, `Dockerfile` `FROM`, Kubernetes/Helm manifests | `opensearchproject/opensearch:2.11.0` |
@@ -291,6 +330,11 @@ the kind of thing that silently returns plausible nonsense.
 | An explainer for a component that was later renamed or deleted reported "no files in scope" | The scope resolved to nothing, which is not the same as being current | A component or directory target that no longer resolves is reported as describing something that no longer exists in the analysis |
 | A freshly written explainer reported itself out of date | The file baseline mixed on-disk mtimes with the analysis's content hash, so anything edited since the analysis looked permanently changed | The baseline is one consistent snapshot, and a moved mtime is confirmed by re-reading and hashing before a change is reported |
 | A single-package repository was reported as one component called "src" | No workspace manifests, so the fallback anchored on the top-level source root | Anchors that own no manifest and contain several substantial child directories are descended through; a lockfile no longer inflates any component, and a source-less component is ancillary |
+| Body extent stopped on the declaration line | A destructured parameter — `function f({ a, b }) {` — opened the body at its `{` and closed it at its `}`, both on that line. Every symbol taking an object parameter had a one-line body, so nothing inside it was scanned. Braces inside parentheses no longer count as the body, and an inline object return type is recognised because the next significant character is a brace, bracket, pipe or `=` |
+| JSX was not a call | `<DiagramView />` renders one component from another but is not a call expression, so the call graph missed the primary composition mechanism of every React codebase, and everything downstream read that absence as "nothing renders this" | JSX element usage is extracted as a `jsx` call, with a lookbehind that keeps generic type arguments such as `Map<K, V>` out |
+| `.js` import specifiers never resolved | TypeScript compiled to ESM must write `./thing.js` although the file on disk is `thing.ts`. The resolver only appended extensions, so it never found the file — 255 of 296 relative imports in a standard NodeNext project were unresolved, which emptied the import graph, the call graph and reachability | A JavaScript extension in a specifier is also tried as its TypeScript equivalent, after the literal path so a real `.js` file still wins |
+| A test was counted from a string | Test-case detection matched anywhere in a file, so a fixture holding generated sample code was counted as a test that reaches nothing | Declarations are matched at the start of a line, which is how a formatter writes them |
+| Freshness judged only by HEAD | A directory that gained version control kept its cached non-git analysis forever, because only the commit id was compared | The repository state is compared as well as the commit id |
 | Verdicts about "dead code" were noisy | Local variables were captured as symbols, and class bodies produced duplicate call edges | Column-zero declarations only, class bodies excluded from call extraction, and a file-reachability condition on dead code |
 
 ## Credentials

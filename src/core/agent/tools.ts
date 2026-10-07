@@ -5,6 +5,8 @@ import { readTextFileSync } from '../util/fs.js';
 import { listCommits } from '../util/git.js';
 import { buildComponentDigest, formatFileTree } from '../explain/digest.js';
 import { truncate } from '../util/text.js';
+import { describeDataModel } from '../analysis/contracts.js';
+import { describeOperations } from '../analysis/ops.js';
 
 /**
  * The explorer's tool set.
@@ -366,15 +368,118 @@ const tools: ToolSpec[] = [
     },
   },
   {
+    name: 'test_coverage',
+    description:
+      'Which source files and components the tests actually reach, derived from the import and call graphs. Use it before claiming anything is tested, untested or covered.',
+    args: '{ "component": "core/analysis" }  // optional: restrict to one component',
+    async run(ctx, args) {
+      const tests = ctx.model.tests;
+      const filter = (str(args, 'component') ?? str(args, 'path') ?? '').toLowerCase();
+      const summary = tests.summary;
+
+      const lines = [
+        `${summary.testFiles} test files, ${summary.testLoc.toLocaleString()} lines of test code, against ${summary.sourceFiles} source files.`,
+        `${summary.percentReferenced}% of source files are referenced by a test (${summary.referenced} of ${summary.sourceFiles}).`,
+      ];
+
+      const components = filter ? tests.components.filter((component) => component.name.toLowerCase().includes(filter) || component.id.includes(filter)) : tests.components;
+      if (components.length > 0) {
+        lines.push('', filter ? `Components matching "${filter}":` : 'By component, least covered first:');
+        for (const component of components.slice(0, 20)) {
+          lines.push(`- ${component.name}: ${component.percent}% (${component.referenced} of ${component.sourceFiles} source files)`);
+        }
+      }
+
+      if (filter && components.length === 0) {
+        lines.push('', `No component matches "${filter}". Known: ${tests.components.map((c) => c.name).join(', ')}`);
+      }
+
+      const untested = filter ? tests.untested.filter((file) => (file.component ?? '').toLowerCase().includes(filter)) : tests.untested;
+      if (untested.length > 0) {
+        lines.push('', 'Source files no test reaches, largest first:');
+        for (const file of untested.slice(0, 15)) {
+          lines.push(`- ${file.path} (${file.loc} lines${file.symbols ? `, ${file.symbols} definitions` : ''})${file.component ? ` — ${file.component}` : ''}`);
+        }
+      }
+
+      if (tests.riskyGaps.length > 0 && !filter) {
+        lines.push('', 'Untested files with the most churn — the riskiest gaps:');
+        for (const gap of tests.riskyGaps.slice(0, 8)) {
+          lines.push(`- ${gap.path} — ${gap.churn} commits, ${gap.loc} lines`);
+        }
+      }
+
+      if (tests.testsReachingNothing.length > 0) {
+        lines.push('', 'Tests that reach no source file at all (they may only exercise a library or a fixture):');
+        for (const test of tests.testsReachingNothing.slice(0, 8)) lines.push(`- ${test.path}`);
+      }
+
+      return {
+        text: bound(`Test coverage derived from the call and import graphs. This measures whether a test reaches a file, not whether it asserts anything useful.
+
+${lines.join('\n')}`),
+        summary: `test_coverage (${summary.percentReferenced}% referenced)`,
+        sources: untested.slice(0, 6).map((file) => ({ path: file.path })),
+      };
+    },
+  },
+  {
     name: 'find_hotspots',
-    description: 'List the files with the highest historical churn weighted by size — where change and complexity meet.',
+    description:
+      'The files where measured complexity and historical churn meet — decision points and control-flow nesting, not line count. Where a new leader should look first.',
     args: '{ "limit": 12 }',
     async run(ctx, args) {
       const limit = Math.min(num(args, 'limit', 12), 30);
       const hotspots = ctx.model.hotspots.slice(0, limit);
       if (hotspots.length === 0) return { text: 'No churn data available (shallow clone or not a git repository).', summary: 'find_hotspots (none)' };
-      const text = hotspots.map((spot) => `- ${spot.path} — ${spot.commits} commits, ${spot.loc.toLocaleString()} lines${spot.components.length ? ` (${spot.components.join(', ')})` : ''}`).join('\n');
+      const text = hotspots
+        .map(
+          (spot) =>
+            `- ${spot.path} — ${spot.commits} commits, ${spot.branches} decision points, nesting depth ${spot.maxDepth}` +
+            `${spot.measured ? '' : ' [no function bodies to measure; ranked by size]'}${spot.components.length ? ` (${spot.components.join(', ')})` : ''}`,
+        )
+        .join('\n');
       return { text: bound(`Hotspots:\n${text}`), summary: `find_hotspots (${hotspots.length})`, sources: hotspots.slice(0, 8).map((spot) => ({ path: spot.path })) };
+    },
+  },
+  {
+    name: 'find_complexity',
+    description:
+      'The hardest definitions to change safely: decision points and control-flow nesting per function, weighted by how many callers depend on it. Use it to answer "where is this codebase difficult", "which function should we split" or "what is risky to touch". Nesting depth counts control-flow blocks only — an indented object literal is not complexity.',
+    args: '{ "path": "src/core/analysis", "limit": 15 }  // both optional',
+    async run(ctx, args) {
+      const report = ctx.model.complexity;
+      const filter = (str(args, 'path') ?? str(args, 'component') ?? '').toLowerCase();
+      const limit = Math.min(num(args, 'limit', 15), 40);
+      if (report.symbols.length === 0) {
+        return { text: 'No function bodies could be measured, so complexity is unavailable for this repository.', summary: 'find_complexity (none)' };
+      }
+
+      const symbols = filter
+        ? report.symbols.filter((symbol) => symbol.path.toLowerCase().includes(filter) || symbol.name.toLowerCase().includes(filter))
+        : report.symbols;
+      const summary = report.summary;
+      const lines = [
+        `${summary.functionsAnalysed.toLocaleString()} definitions measured. Mean ${summary.meanBranches} decision points and nesting depth ${summary.meanDepth}. ` +
+          `Deepest nesting ${summary.deepest}; most decision points ${summary.mostBranches}.`,
+        `${summary.deepFunctions} function(s) nest ${4}+ levels deep and ${summary.branchyFunctions} carry ${10}+ decision points.`,
+        '',
+        'Hardest to change safely — difficulty weighted by the number of callers that depend on it:',
+      ];
+      for (const symbol of symbols.slice(0, limit)) {
+        lines.push(
+          `- ${symbol.name} (${symbol.kind}) — ${symbol.branches} decision points, depth ${symbol.maxDepth}, ` +
+            `${symbol.callers} caller(s)${symbol.reachable ? '' : ', unreachable'} — ${symbol.path}:${symbol.line}`,
+        );
+      }
+      if (filter && symbols.length === 0) lines.push(`Nothing matches "${filter}".`);
+      lines.push('', 'Files ranked by complexity rather than size:');
+      const files = filter ? report.files.filter((file) => file.path.toLowerCase().includes(filter)) : report.files;
+      for (const file of files.slice(0, 10)) {
+        lines.push(`- ${file.path} — ${file.branches} decision points across ${file.symbols} definitions, depth ${file.maxDepth}`);
+      }
+
+      return { text: bound(`Complexity:\n${lines.join('\n')}`), summary: `find_complexity (${symbols.length})` };
     },
   },
   {
@@ -387,6 +492,273 @@ const tools: ToolSpec[] = [
       if (candidates.length === 0) return { text: 'No unreachable definitions stood out.', summary: 'find_dead_code (none)' };
       const text = candidates.map((item) => `- ${item.name} (${item.kind}, ${item.loc} lines) — ${item.path} — ${item.reason}`).join('\n');
       return { text: bound(`Possibly unreachable definitions:\n${text}`), summary: `find_dead_code (${candidates.length})`, sources: candidates.slice(0, 8).map((item) => ({ path: item.path })) };
+    },
+  },
+  {
+    name: 'operational_surface',
+    description:
+      'How the project is built, verified, shipped and run: CI jobs and the commands they run, Dockerfile stages and ports, compose services, infrastructure manifests, package scripts and the environment variables that must be set. Use it for any question about deployment, operations, environment configuration or what verifies a change.',
+    args: '{ "section": "ci" | "containers" | "compose" | "infra" | "scripts" | "env" | "summary" }  // optional',
+    async run(ctx, args) {
+      const ops = ctx.model.ops;
+      const section = (str(args, 'section') ?? '').toLowerCase();
+      const lines: string[] = [];
+
+      const want = (name: string) => !section || section === name || section === 'all';
+
+      if (want('summary') || !section) {
+        lines.push('## Summary');
+        const described = describeOperations(ops);
+        if (described.length === 0) lines.push('No CI definitions, containers, infrastructure or scripts were found.');
+        for (const line of described) lines.push(`- ${line}`);
+      }
+
+      if (want('ci') && ops.ci.length > 0) {
+        lines.push('', '## CI');
+        for (const workflow of ops.ci) {
+          lines.push(`${workflow.path} (${workflow.name}) — triggers: ${workflow.triggers.join(', ') || 'none declared'}${workflow.gating ? ' [runs on push/PR and has commands, so it gates merges]' : ''}`);
+          for (const job of workflow.jobs) {
+            lines.push(`  job "${job.id}"${job.runner ? ` on ${job.runner}` : ''}${job.needs.length > 0 ? ` needs ${job.needs.join(', ')}` : ''}`);
+            for (const command of job.commands.slice(0, 12)) lines.push(`    $ ${command}`);
+            for (const action of job.actions.slice(0, 8)) lines.push(`    uses ${action}`);
+          }
+        }
+      } else if (want('ci') && section === 'ci') {
+        lines.push('No CI definitions were found in this repository, so nothing automatically verifies a change.');
+      }
+
+      if (want('containers') && ops.containers.length > 0) {
+        lines.push('', '## Containers');
+        for (const container of ops.containers) {
+          lines.push(`${container.path}: ${container.multiStage ? `${container.stages.length}-stage build` : 'single stage'}`);
+          for (const stage of container.stages) lines.push(`  stage ${stage.name} from ${stage.base} (line ${stage.line})`);
+          if (container.exposedPorts.length > 0) lines.push(`  exposes ${container.exposedPorts.join(', ')}`);
+          if (container.entrypoint) lines.push(`  entrypoint: ${container.entrypoint}`);
+          if (container.cmd) lines.push(`  cmd: ${container.cmd}`);
+          if (container.workdir) lines.push(`  workdir: ${container.workdir}`);
+          lines.push(`  user: ${container.user ?? 'not set — runs as root'}`);
+          if (container.buildArgs.length > 0) lines.push(`  build args: ${container.buildArgs.join(', ')}`);
+          if (!container.healthcheck) lines.push('  no HEALTHCHECK declared');
+          if (!container.cachesDependencies) lines.push('  dependencies are installed after the source is copied, so every source change rebuilds them');
+        }
+      }
+
+      if (want('compose') && ops.compose.length > 0) {
+        lines.push('', '## Compose');
+        for (const file of ops.compose) {
+          lines.push(file.path);
+          for (const service of file.services) {
+            lines.push(
+              `  ${service.name}: ${service.image ?? 'built locally'}${service.build ? ` from ${service.build}` : ''}` +
+                (service.ports.length > 0 ? `, ports ${service.ports.join(' ')}` : '') +
+                (service.dependsOn.length > 0 ? `, depends on ${service.dependsOn.join(', ')}` : '') +
+                (service.environment.length > 0 ? `, env ${service.environment.join(', ')}` : ''),
+            );
+          }
+        }
+      }
+
+      if (want('infra') && ops.infra.length > 0) {
+        lines.push('', '## Infrastructure');
+        for (const file of ops.infra) {
+          const counts = new Map<string, number>();
+          for (const resource of file.resources) counts.set(resource.kind, (counts.get(resource.kind) ?? 0) + 1);
+          lines.push(`${file.path} (${file.format}): ${[...counts.entries()].map(([kind, count]) => `${count}× ${kind}`).join(', ') || 'nothing parsed'}`);
+          if (file.images.length > 0) lines.push(`  images: ${file.images.join(', ')}`);
+        }
+      }
+
+      if (want('scripts')) {
+        lines.push('', '## Scripts');
+        if (ops.scripts.length === 0) lines.push('No package or build scripts were found.');
+        for (const script of ops.scripts.slice(0, 40)) lines.push(`${script.manifest} → ${script.name} (${script.category}): ${script.command}`);
+      }
+
+      if (want('env')) {
+        lines.push('', '## Environment variables');
+        const real = ops.envVars.filter((entry) => !entry.testOnly);
+        if (real.length === 0) lines.push('None declared outside tests.');
+        for (const entry of real.slice(0, 40)) lines.push(`${entry.name} — declared in ${entry.files.slice(0, 3).join(', ')}`);
+      }
+
+      if (ops.warnings.length > 0) lines.push('', `Note: ${ops.warnings.join(' ')}`);
+      const text = lines.join('\n') || 'Nothing operational was found for that section.';
+      const counts = `${ops.ci.length} CI, ${ops.containers.length} container(s), ${ops.infra.length} infra file(s)`;
+      return {
+        text: bound(`Operational surface (${counts}):\n${text}`),
+        summary: `operational_surface (${section || 'all'})`,
+      };
+    },
+  },
+  {
+    name: 'change_coupling',
+    description:
+      'Which files change together in git history, and who owns each component. Reveals dependencies the import graph does not show (two files that must always move as a pair, especially across components) and key-person risk. Use it for questions about change risk, blast radius, ownership or maintenance.',
+    args: '{ "path": "src/core/analysis" }  // optional: only pairs touching this path',
+    async run(ctx, args) {
+      const coupling = ctx.model.coupling;
+      const filter = (str(args, 'path') ?? str(args, 'component') ?? '').toLowerCase();
+      if (coupling.totalCommits < 5) {
+        return {
+          text: `Not enough history to measure coupling: ${coupling.totalCommits} commit(s) reachable.`,
+          summary: 'change_coupling (too little history)',
+        };
+      }
+
+      const lines: string[] = [`${coupling.totalCommits} commits of history analysed.`];
+
+      const pairs = filter
+        ? coupling.pairs.filter((pair) => pair.a.toLowerCase().includes(filter) || pair.b.toLowerCase().includes(filter))
+        : coupling.pairs;
+      const cross = pairs.filter((pair) => pair.crossComponent);
+      const same = pairs.filter((pair) => !pair.crossComponent);
+
+      if (cross.length > 0) {
+        lines.push('', 'Files in different components that change together — the import graph does not show these:');
+        for (const pair of cross.slice(0, 12)) {
+          lines.push(`- ${pair.a} + ${pair.b} — ${pair.together} commits together, confidence ${pair.confidence}`);
+        }
+      }
+      if (same.length > 0) {
+        lines.push('', 'Files that change together within one component:');
+        for (const pair of same.slice(0, 10)) {
+          lines.push(`- ${pair.a} + ${pair.b} — ${pair.together} commits together, confidence ${pair.confidence}`);
+        }
+      }
+      if (pairs.length === 0) lines.push('', filter ? `No coupled pairs involve "${filter}".` : 'No file pairs change together often enough to be notable.');
+
+      const components = filter
+        ? coupling.components.filter((component) => component.name.toLowerCase().includes(filter) || component.id.includes(filter))
+        : coupling.components;
+      if (components.length > 0) {
+        lines.push('', 'Ownership by component (bus factor = authors covering half the commits):');
+        for (const component of components.slice(0, 16)) {
+          lines.push(
+            `- ${component.name}: ${component.commits} commits, ${component.authors} author(s), ` +
+              `${Math.round(component.topAuthorShare * 100)}% from ${component.topAuthor}, bus factor ${component.busFactor}`,
+          );
+        }
+      }
+
+      if (!filter && coupling.singleOwner.length > 0) {
+        lines.push('', 'Key-person risk — one person wrote almost all of the history for:');
+        for (const component of coupling.singleOwner.slice(0, 8)) {
+          lines.push(`- ${component.name} (${Math.round(component.topAuthorShare * 100)}% ${component.topAuthor}, ${component.commits} commits)`);
+        }
+      }
+
+      if (filter && pairs.length === 0 && components.length === 0) lines.push('', `Nothing in the history matches "${filter}".`);
+      if (coupling.warnings.length > 0) lines.push('', `Note: ${coupling.warnings.join(' ')}`);
+
+      return {
+        text: bound(`Change coupling and ownership:\n${lines.join('\n')}`),
+        summary: `change_coupling (${pairs.length} pairs)`,
+      };
+    },
+  },
+  {
+    name: 'list_conventions',
+    description:
+      'The conventions this codebase actually follows, inferred by measuring its own majority behaviour, and the files that break them. Covers dependency direction between components, file and test naming, where tests live, and whether one file owns configuration or logging. Use it to answer "how should I write code here" and "is this file doing something unusual".',
+    args: '{ "rule": "layering" }  // optional: filter rules by id or text',
+    async run(ctx, args) {
+      const report = ctx.model.conventions;
+      const filter = (str(args, 'rule') ?? '').toLowerCase();
+      if (report.rules.length === 0) {
+        return {
+          text: 'No conventions were strongly enough supported to state as rules. That usually means the repository is small, very new, or deliberately inconsistent.',
+          summary: 'list_conventions (none)',
+        };
+      }
+
+      const rules = filter ? report.rules.filter((rule) => rule.id.includes(filter) || rule.rule.toLowerCase().includes(filter)) : report.rules;
+      const lines: string[] = [
+        `${report.summary.derived} convention(s) inferred from this repository, with ${report.summary.violations} exception(s).`,
+        'Each rule is what the code mostly does, not what is generally considered good practice.',
+        '',
+      ];
+      for (const rule of rules) {
+        lines.push(`${rule.rule} (${rule.basis})`);
+        for (const violation of rule.violations) {
+          lines.push(`  exception: ${violation.path}${violation.line ? `:${violation.line}` : ''} — ${violation.detail}`);
+        }
+        if (rule.violations.length === 0) lines.push('  no exceptions.');
+      }
+      if (filter && rules.length === 0) lines.push(`No rule matches "${filter}". Known: ${report.rules.map((rule) => rule.id).join(', ')}`);
+      if (!filter && report.weakPatterns.length > 0) {
+        lines.push('', 'Patterns too mixed to call a convention — worth knowing, but there is no rule to break:');
+        for (const pattern of report.weakPatterns) lines.push(`- ${pattern}`);
+      }
+
+      return { text: bound(`Conventions:\n${lines.join('\n')}`), summary: `list_conventions (${rules.length} rules)` };
+    },
+  },
+  {
+    name: 'data_model',
+    description:
+      'The shape of the data: SQL tables with their columns, keys and foreign keys, ORM models, GraphQL and protobuf types, OpenAPI schemas and enums, read from the files that declare them. Use it for any question about what the system stores, how the entities relate, or what an API accepts and returns.',
+    args: '{ "name": "users" }  // optional: one schema by name',
+    async run(ctx, args) {
+      const model = ctx.model.dataModel;
+      const filter = (str(args, 'name') ?? str(args, 'schema') ?? '').toLowerCase();
+      if (model.schemas.length === 0 && model.apiSpecs.length === 0) {
+        return {
+          text: 'No schema, migration or API definition was found in the repository. The data model may be defined elsewhere, or the system may not have one.',
+          summary: 'data_model (none)',
+        };
+      }
+
+      const lines: string[] = [];
+      for (const line of describeDataModel(model)) lines.push(`- ${line}`);
+
+      const schemas = filter ? model.schemas.filter((schema) => schema.name.toLowerCase().includes(filter)) : model.schemas;
+      if (filter && schemas.length === 0) {
+        lines.push('', `No schema matches "${filter}". Known: ${model.schemas.map((schema) => schema.name).join(', ')}`);
+      }
+      for (const schema of schemas.slice(0, 24)) {
+        lines.push('', `${schema.name} (${schema.kind}${schema.source ? `, ${schema.source}` : ''}) — ${schema.path}:${schema.line}`);
+        for (const field of schema.fields.slice(0, 20)) {
+          lines.push(`  ${field.name}: ${field.type}${field.optional ? '?' : ''}${field.note ? ` (${field.note})` : ''}`);
+        }
+        if (schema.primaryKey.length > 0) lines.push(`  primary key: ${schema.primaryKey.join(', ')}`);
+        for (const key of schema.foreignKeys.slice(0, 10)) lines.push(`  foreign key: ${key.column} -> ${key.references}`);
+        for (const operation of schema.operations.slice(0, 12)) lines.push(`  ${operation.kind}: ${operation.name}`);
+      }
+      if (model.migrations.length > 0) {
+        lines.push('', 'Schema files in the order they would apply:');
+        for (const migration of model.migrations.slice(0, 15)) {
+          lines.push(
+            `- ${migration.path} — ${migration.statements} statement(s)` +
+              (migration.creates.length > 0 ? `, creates ${migration.creates.join(', ')}` : '') +
+              (migration.alters.length > 0 ? `, alters ${migration.alters.join(', ')}` : ''),
+          );
+        }
+      }
+      if (model.warnings.length > 0) lines.push('', `Note: ${model.warnings.join(' ')}`);
+
+      return { text: bound(`Data model:\n${lines.join('\n')}`), summary: `data_model (${schemas.length} schema(s))` };
+    },
+  },
+  {
+    name: 'find_gaps',
+    description:
+      'What the repository does not state about itself: no CI, no tests reaching the most complex code, no deployment definition, a database with no schema, unpinned dependencies, no licence, no observability. Each finding names the facts it is derived from. Use it for due diligence, onboarding risk, or any question about what is missing or unverified.',
+    args: '{}',
+    async run(ctx) {
+      const report = ctx.model.gaps;
+      if (report.summary.checked === 0) {
+        return { text: 'The repository is too small or too unusual for absences to mean anything.', summary: 'find_gaps (nothing checked)' };
+      }
+      const lines = [`${report.summary.met} of ${report.summary.checked} things a repository of this kind usually states are present.`, ''];
+      for (const gap of report.gaps) {
+        lines.push(`ABSENT [${gap.weight}] ${gap.title}`);
+        lines.push(`  ${gap.detail}`);
+        for (const item of gap.evidence.slice(0, 5)) lines.push(`  evidence: ${item}`);
+        if (gap.paths.length > 0) lines.push(`  look at: ${gap.paths.slice(0, 5).join(', ')}`);
+      }
+      if (report.gaps.length === 0) lines.push('Nothing notable is absent.');
+      lines.push('', `Present: ${report.met.map((item) => item.title).join('; ')}.`);
+      return { text: bound(`What is absent:\n${lines.join('\n')}`), summary: `find_gaps (${report.gaps.length} absent)` };
     },
   },
   {

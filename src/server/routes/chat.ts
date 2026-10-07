@@ -66,7 +66,8 @@ export async function registerChatRoutes(app: FastifyInstance, deps: RouteDeps):
     }
 
     await withSse(reply, async (emit) => {
-      emit.send({ type: 'status', message: 'Searching the repository' });
+      // No status here: askRepo emits it as its first action, and emitting it
+      // twice made the progress line flicker between identical messages.
       const result = await askRepo(ctx, {
         question,
         sessionId: body.sessionId,
@@ -74,8 +75,9 @@ export async function registerChatRoutes(app: FastifyInstance, deps: RouteDeps):
         onToken: (delta) => emit.send({ type: 'token', delta }),
         onStatus: (message) => emit.send({ type: 'status', message }),
         onCitations: (citations) => emit.send({ type: 'citations', citations }),
+        onStep: (step) => emit.send({ type: 'step', step }),
       });
-      emit.send({ type: 'done', sessionId: result.session.id, title: result.session.title });
+      emit.send({ type: 'done', sessionId: result.session.id, title: result.session.title, steps: result.steps });
     });
     return reply;
   });

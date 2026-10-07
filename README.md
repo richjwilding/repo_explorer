@@ -266,6 +266,207 @@ Navigation is explicit about direction:
 Following a cross-reference starts a new trail rather than nesting under what you were reading, so the breadcrumb
 never implies a hierarchy that is not there.
 
+## What is measured, and how
+
+Everything the app asserts about structure comes from static analysis, and the
+language model investigates with those results rather than reading the repository
+blind. The measurements are listed here because each one is a claim the model is
+allowed to make.
+
+| Measured | How | What it is not |
+| --- | --- | --- |
+| Call graph | symbol-level, resolved across files through imports and bindings; includes `new`, methods, callbacks and JSX element usage | not a type-checked graph — a call through a dynamically chosen property will not appear |
+| Reachability | breadth-first from detected entrypoints over resolved edges | unreached is a question to investigate, never a verdict |
+| Test coverage | a source file is *reached* when a test file imports it, calls into it, or gets there within two hops through fixtures | says something exercises the code, **not** that the code is correct |
+| Hotspots | commit count weighted by size | churn is not risk |
+| Dependency names | the exact identifiers found in imports, container images, environment variables and connection strings | no curated product list, so an unfamiliar name is reported as written |
+
+### Test coverage
+
+The Tests tab answers the question an engineering leader asks first. It is
+derived from the import and call graphs, so it is exact rather than sampled:
+
+- **By component**, least covered first, so the weakest area is the first thing
+  you see.
+- **The riskiest gaps** — files no test reaches that also carry the most commit
+  history, which is where churn meets absence of verification.
+- **Files no test reaches**, largest first.
+- **Tests that reach no source file at all**, which usually means they exercise a
+  library or a fixture rather than this repository's own code.
+
+A file under `tests/` only counts as a test if it actually declares a test case.
+A fixture or helper is not evidence of coverage, and neither is a file that
+merely mentions a test case inside a string.
+
+### How it runs
+
+The **Running it** tab answers the question that reading source cannot: if I
+change this, what runs, what checks it, and how does it reach production? It is
+read from files whose whole purpose is to state those facts, never inferred from
+a dependency's name:
+
+| Read from | What it tells you |
+| --- | --- |
+| CI definitions (GitHub, GitLab, CircleCI, Buildkite, Azure, Jenkins, …) | triggers, jobs, the exact commands a merge must pass, the actions used |
+| `Dockerfile`s | stages and base images, exposed ports, entrypoint, `USER`, healthcheck, and whether dependencies are cached or rebuilt on every source change |
+| Compose files | services, images, ports, start ordering, environment names |
+| Kubernetes, Terraform, Helm, CloudFormation, Serverless | the resources declared, and the container images actually deployed |
+| Package and build scripts | which script is the test, the build, the lint, the migration, the deploy |
+| `.env` files, code accessors, shell `export` | the configuration somebody has to set to run the thing |
+
+**An absence is reported as plainly as a presence.** "No CI definitions found —
+nothing automatically verifies a change" is a finding an engineering leader can
+act on, and it is not the same statement as "I did not look". The same applies
+to a container with no `USER` (it runs as root), or with no healthcheck.
+
+Environment variables that appear only in tests or fixtures are listed
+separately and never head the list, so a fixture's `DATABASE_URL` is not
+mistaken for a deployment requirement.
+
+### Complexity, not size
+
+Line count is the cheapest proxy for "this is hard" and a poor one: a 400-line
+table of constants is easy, and a 40-line function with eight nested branches is
+not. So complexity is **measured** per definition:
+
+- **Decision points** — the branches a reader has to hold in their head.
+- **Control-flow nesting** — how deep those are stacked, weighted twice in the
+  score, because holding an outer condition while reasoning about an inner one
+  is the expensive part.
+- **Blast radius** — how many callers depend on it. Changing a branchy function
+  nothing calls is cheap; changing one with thirty callers is not.
+
+The History tab ranks the hardest definitions to change safely, and ranks files
+by complexity × churn rather than size × churn.
+
+Three things the measurement deliberately excludes, because each would make the
+numbers untrustworthy:
+
+- **Keywords in strings and comments.** `"if you want, for the while case"` is
+  not five branches. Code is stripped of comments and string contents first.
+- **An indented object literal.** A brace opens a nesting level only when what
+  precedes it is a control construct or a function head, so a nested config
+  object is not counted as complexity.
+- **A file with no function bodies.** A heavily edited stylesheet or lockfile
+  has no measurable complexity, so it is ranked by size and *labelled* as such
+  rather than mixed into the same ranking as if the numbers were comparable.
+
+### Coupling and ownership
+
+The History tab also reads history rather than code, because the import graph
+shows the architecture a project *declares* and history shows the one it *has*:
+
+- **Files that change together.** Confidence is "when one changes, the other
+  usually does". Pairs spanning two components are listed first — those are
+  dependencies the import graph does not show, and usually the reason a small
+  change turns out to be large.
+- **Who owns what**, per component, with the share contributed by the most
+  active author.
+- **Bus factor** — how many people have to leave before nobody is left who has
+  written half a component's history. A component where one person wrote at
+  least 80% of the history over enough commits to make the pattern real is
+  flagged as key-person risk.
+
+Three things are deliberately not reported, because reporting them would be
+noise rather than signal: a pair seen together once, a file that changes in
+almost every commit (it couples with everything, which says nothing), and a
+commit touching more than forty files (a merge or a whole-repo reformat).
+Excluded large commits are counted and disclosed.
+
+Comparing a `FeatureBranch` against a base is not needed for any of this — it
+all comes from one pass over the default branch's log.
+
+### Contracts and the data model
+
+The Contracts tab holds the interfaces and the data: the endpoints the code
+declares, the API definitions it publishes, and the shape of what it stores. A
+schema is a claim the system makes about the world and is usually the most
+stable thing in a repository, which makes it a fast route in.
+
+Read from the files that declare the shape, never inferred from usage:
+
+| Format | What is read |
+| --- | --- |
+| SQL (`.sql`) | tables, columns with types extracted separately from their constraints, primary keys including composites, foreign keys from both column definitions and later `ALTER TABLE`s, and the order migrations would apply |
+| Prisma | models, fields with `?` and `[]` separated from the base type, `@id` and `@@id` keys, enums |
+| GraphQL | types, inputs, interfaces, unions, field nullability, and `Query`/`Mutation` fields as operations |
+| Protobuf | messages, field labels, enums, services and their `rpc`s |
+| OpenAPI / Swagger | component schemas, required fields, and operations |
+| JSON Schema | properties and required fields |
+
+Two things are stated plainly rather than left blank:
+
+- **A database with no schema in the repository.** If the dependencies name a
+  store but no table or model is found, the tab says the schema lives elsewhere.
+  That is worth knowing before reaching for a migration.
+- **A store only a test mentions.** `postgres://` inside a fixture is not a
+  PostgreSQL deployment, so a store named only in tests is listed separately and
+  never presented as production storage.
+
+### Conventions, and where the code breaks them
+
+The Conventions tab is the step from describing a codebase to reviewing it.
+Every rule is **inferred by measuring this repository's own behaviour** — the
+majority direction of its imports, the names it actually uses, where its tests
+actually live — and is only stated when it is both well supported (at least five
+cases) and closely followed (at least 80%). A rule followed by three files is
+not a convention.
+
+Rules that can be derived this way:
+
+| Rule | Derived from |
+| --- | --- |
+| Dependency direction — "`core/chat` depends on `core/agent`, not the reverse" | the majority direction of each component pair in the import graph |
+| File naming per directory and extension | the names of the files themselves |
+| Where tests live, and what they are called | the placement and names of files that actually declare test cases |
+| Single-door configuration — "configuration is read through `config.ts`" | which file holds most of the environment reads |
+| Single-door logging | which files import the project's own logger |
+| Directory barrels | whether multi-module directories re-export through an `index` |
+
+A convention here is a **description, not an opinion**: it says what the code
+does, not what is generally considered good practice. An exception is a question
+worth asking rather than a defect.
+
+Two things are deliberately kept out:
+
+- **A helper is not a test.** A fixture under `tests/` does not follow the test
+  naming convention because it is not a test, so counting it would manufacture
+  an exception that does not exist.
+- **A pattern that is genuinely mixed is reported as mixed**, not promoted to a
+  rule and then used to flag half the repository. A mutual dependency between
+  two components is a finding in its own right, but it is not one of them
+  breaking a rule.
+
+### What the repository does not say
+
+The Gaps tab reports **negative space** — what is absent, which is harder to see
+than what is present and often more useful. A missing migration or an untested
+complex path is invisible in a list of what exists, and it is exactly what an
+incoming leader needs to know.
+
+Two rules govern every finding:
+
+1. **Only report an absence derivable from a measured fact.** "No test reaches
+   this file" comes from the coverage graph. "This is insecure" is not derivable
+   and is never said.
+2. **An absence is an observation, not a verdict.** A project can have no CI, or
+   no licence, for a good reason that is not visible from here. Each entry names
+   the facts behind it and leaves the judgement to the reader.
+
+What is checked:
+
+| | |
+| --- | --- |
+| Verification | no CI at all; CI that does not appear to run the tests it has; no tests at all; the hardest-to-change functions with no test reaching them |
+| Running it | no deployment definition; containers without a healthcheck; no observability library named for something that is deployed |
+| Data | a store in use with no declared schema; tables declared with no migration history |
+| Onboarding | no lockfile; configuration read but no `.env.example`; no README; no licence |
+| Robustness | route handlers whose opening shows no error handling (stated as a reading of the handler, not a guarantee); unreachable definitions |
+
+Findings are ordered by how much they usually matter, and every expectation that
+*is* met is listed alongside them, so the report reads as a balance rather than a
+list of complaints.
+
 ## Repositories without git
 
 Architecture and source explanations work on any directory, tracked or not. Commit, PR and diff explainers need

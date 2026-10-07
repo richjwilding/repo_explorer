@@ -448,6 +448,21 @@ function parentDir(p: string): string {
  * Resolve an import specifier to a repo-relative file path.
  * Returns null for external packages.
  */
+/**
+ * What a JavaScript extension in an import specifier may really be on disk.
+ *
+ * A project compiled with `module: NodeNext` writes `./foo.js` and ships
+ * `foo.ts`. The written name is not a mistake to be tolerated; it is the
+ * convention, and it is the majority of imports in any modern TypeScript
+ * repository.
+ */
+const JS_EXTENSION_SWAPS: Record<string, string[]> = {
+  '.js': ['.ts', '.tsx', '.mts', '.cts', '.jsx'],
+  '.jsx': ['.tsx'],
+  '.mjs': ['.mts'],
+  '.cjs': ['.cts'],
+};
+
 export function resolveSpecifier(fromPath: string, specifier: string, knownPaths: Set<string>, aliasRoots: string[] = []): string | null {
   const fromDir = fromPath.includes('/') ? fromPath.slice(0, fromPath.lastIndexOf('/')) : '';
 
@@ -462,6 +477,15 @@ export function resolveSpecifier(fromPath: string, specifier: string, knownPaths
       const current = stack.pop() as string;
       for (const ext of ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte', '.py', '.rb', '.go', '.rs', '.java', '.kt', '.cs', '.php', '.swift', '.h', '.hpp', '.c', '.cpp', '.sh']) {
         candidates.push(current + ext);
+      }
+      // TypeScript compiled to ESM must write `./thing.js` even though the file
+      // on disk is `thing.ts` — NodeNext requires the emitted extension. Without
+      // swapping it back, every import in such a project is unresolved, which
+      // silently empties the import graph, the call graph and reachability.
+      for (const [written, real] of Object.entries(JS_EXTENSION_SWAPS)) {
+        if (!current.endsWith(written) || current.length === written.length) continue;
+        const stem = current.slice(0, -written.length);
+        for (const swap of real) candidates.push(stem + swap);
       }
       for (const idx of ['index.ts', 'index.tsx', 'index.js', 'index.jsx', 'index.mjs', '__init__.py', 'mod.rs', 'index.vue', 'index.svelte', 'main.go']) {
         candidates.push(`${current}/${idx}`);

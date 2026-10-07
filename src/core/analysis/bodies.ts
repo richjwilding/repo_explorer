@@ -33,6 +33,16 @@ function endByBraces(lines: string[], startIndex: number, maxLines: number): num
   let depth = 0;
   let opened = false;
   let inBlockComment = false;
+  /**
+   * Braces seen inside parentheses belong to a parameter list, not to the body.
+   *
+   * A destructured parameter — `function SectionRenderer({ section, onOpenFile }) {`
+   * — used to open the body at its `{` and close it at its `}`, both on the
+   * declaration line. Every symbol taking an object parameter therefore had a
+   * body one line long, so nothing inside it was scanned: no calls, no JSX, no
+   * reachability. In a codebase of modern TypeScript that is most of the code.
+   */
+  let parenDepth = 0;
 
   for (let i = startIndex; i < maxLines; i += 1) {
     const line = lines[i];
@@ -88,12 +98,30 @@ function endByBraces(lines: string[], startIndex: number, maxLines: number): num
         inTemplate = true;
         continue;
       }
-      if (ch === '{') {
+      if (ch === '(') {
+        parenDepth += 1;
+      } else if (ch === ')') {
+        parenDepth = Math.max(0, parenDepth - 1);
+      } else if (ch === '{') {
+        if (parenDepth > 0) continue;
         depth += 1;
         opened = true;
       } else if (ch === '}') {
+        if (parenDepth > 0) continue;
         depth -= 1;
-        if (opened && depth === 0) return i;
+        if (opened && depth === 0) {
+          // A return-type annotation written inline — `function f(x): { a: string } {`
+          // — opens and closes before the body does, so the body would end on the
+          // declaration line. If the construct continues, that brace was a type.
+          const after = nextSignificantChar(lines, i, c + 1, maxLines);
+          // `{ a } | null`, `Promise<{ a }>`, `{ a }[]`, `{ a } = default`.
+          const continues = after !== null && ['{', '[', '=', '|', '&', '>'].includes(after.ch);
+          if (continues) {
+            opened = false;
+            continue;
+          }
+          return i;
+        }
       }
     }
     // A signature that opens no brace and ends in ';' is a declaration.
@@ -101,6 +129,48 @@ function endByBraces(lines: string[], startIndex: number, maxLines: number): num
     if (!opened && i > startIndex + 6) return i;
   }
   return Math.min(lines.length, startIndex + 80) - 1;
+}
+
+/**
+ * The next non-whitespace character from a position, across lines, ignoring
+ * comments. Used to tell a type annotation that has just closed from the body
+ * that is about to open.
+ */
+function nextSignificantChar(
+  lines: string[],
+  fromLine: number,
+  fromCol: number,
+  maxLines: number,
+): { ch: string; next: string } | null {
+  for (let i = fromLine; i < maxLines; i += 1) {
+    const line = lines[i];
+    for (let c = i === fromLine ? fromCol : 0; c < line.length; c += 1) {
+      const ch = line[c];
+      if (ch === ' ' || ch === '\t' || ch === '\r') continue;
+      if (ch === '/' && line[c + 1] === '/') break;
+      if (ch === '/' && line[c + 1] === '*') {
+        const closes = line.indexOf('*/', c + 2);
+        if (closes !== -1) {
+          c = closes + 1;
+          continue;
+        }
+        // Block comment running onto later lines: skip until it closes.
+        let closed = false;
+        for (let j = i + 1; j < maxLines && !closed; j += 1) {
+          const end = lines[j].indexOf('*/');
+          if (end !== -1) {
+            i = j;
+            c = end + 1;
+            closed = true;
+          }
+        }
+        if (!closed) return null;
+        continue;
+      }
+      return { ch, next: line[c + 1] ?? '' };
+    }
+  }
+  return null;
 }
 
 function endByIndent(lines: string[], startIndex: number, maxLines: number): number {

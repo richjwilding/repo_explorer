@@ -25,6 +25,14 @@ import { gitSummary, gitVisibleFiles, isGitRepo, makeRepoRef } from '../util/git
 import { classifyFile, detectLanguage, isNoiseFile, isParsable } from './languages.js';
 import { extractFileFacts, normalizePath, packageName, resolveSpecifier, type RawImport } from './imports.js';
 import { buildCallGraph } from './callgraph.js';
+import { computeComplexity } from './complexity.js';
+import { computeDataModel } from './contracts.js';
+import { computeGaps } from './gaps.js';
+import { computeConventions } from './conventions.js';
+import type { ComplexityReport } from './complexity.js';
+import { computeCoupling } from './coupling.js';
+import { computeOperationalSurface } from './ops.js';
+import { computeTestCoverage, hasTestCases, familyOfLanguage } from './tests.js';
 import {
   buildStack,
   createDependencyAccumulator,
@@ -39,7 +47,7 @@ import {
 import { countLines, firstLines, jaccard, splitIdentifier, tokenize, topN, unique } from '../util/text.js';
 import { shortHash, slugify } from '../util/id.js';
 
-export const ANALYSIS_VERSION = 9;
+export const ANALYSIS_VERSION = 18;
 
 export interface AnalyzeOptions {
   maxFiles?: number;
@@ -195,8 +203,104 @@ export async function analyzeRepo(rootInput: string, options: AnalyzeOptions = {
     }
   }
 
+  // Which test files really declare test cases. Recorded here, while the text is
+  // still in memory, because it is freed on the next line and a file that merely
+  // lives under tests/ is not a test.
+  const testCaseFiles = new Set(
+    pass
+      .filter((file) => file.entry.category === 'test' && hasTestCases(file.text, familyOfLanguage(file.entry.language)))
+      .map((file) => file.path),
+  );
+
+  // Difficulty rather than size. Measured while bodies are still available,
+  // because line count is a poor proxy: a table of constants is easy and a short
+  // function with eight nested branches is not.
+  progress('Measuring complexity', 91);
+  const symbolsByPath = new Map<string, typeof callGraph.symbols>();
+  for (const symbol of callGraph.symbols) {
+    const list = symbolsByPath.get(symbol.path) ?? [];
+    list.push(symbol);
+    symbolsByPath.set(symbol.path, list);
+  }
+  const churnByPath = new Map(git.churn.map((entry) => [entry.path, entry.commits]));
+  const complexity = computeComplexity({
+    files: pass
+      .filter((file) => file.text !== null)
+      .map((file) => ({
+        path: file.path,
+        language: file.entry.language,
+        text: file.text as string,
+        entryLines: file.entry.lines,
+        symbols: (symbolsByPath.get(file.path) ?? []).map((symbol) => ({
+          id: symbol.id,
+          name: symbol.name,
+          kind: symbol.kind,
+          line: symbol.line,
+          endLine: symbol.endLine,
+          callers: symbol.callerCount,
+          reachable: symbol.reachable,
+        })),
+      })),
+    churn: churnByPath,
+  });
+
+  // The shape of the data. Read from the files that declare it — SQL, ORM
+  // schemas and API definitions — because the schema is usually the most stable
+  // and most informative statement a system makes about itself.
+  progress('Reading the data model', 91);
+  const dataModel = computeDataModel({
+    files: pass.map((file) => ({ path: file.path, text: file.text })),
+    dependencies: dependencies.map((dependency) => ({ name: dependency.name, category: dependency.category, label: dependency.label, kind: dependency.kind, evidence: dependency.evidence })),
+  });
+
+  // Conventions the code follows, and the exceptions. Derived from the majority
+  // behaviour of this repository, so the rules are facts about it rather than
+  // general practice asserted at it.
+  progress('Inferring conventions', 92);
+  const conventions = computeConventions({
+    files: pass.map((file) => ({ path: file.path, language: file.entry.language, category: file.entry.category })),
+    imports: imports.map((edge) => ({ from: edge.from, to: edge.to })),
+    components: components.map((component) => ({ id: component.id, name: component.name, files: component.files })),
+    sources: pass
+      .filter((file) => file.text !== null)
+      .filter((file) => file.entry.category === 'source' || file.entry.category === 'test')
+      .map((file) => ({ path: file.path, text: file.text as string })),
+    testCaseFiles,
+  });
+
+  // How the project is built, verified and shipped — read from CI definitions,
+  // Dockerfiles, compose files, infrastructure manifests and package scripts
+  // while their text is still in memory.
+  const ops = computeOperationalSurface({
+    files: pass.map((file) => ({ path: file.path, text: file.text })),
+    manifests,
+  });
+
+  // Only the files holding route handlers are needed after the text is freed, so
+  // keep just those rather than holding the whole repository in memory.
+  const routeSources = new Map<string, string>();
+  for (const route of callGraph.routes) {
+    if (routeSources.has(route.file)) continue;
+    const file = pass.find((candidate) => candidate.path === route.file);
+    if (file?.text) routeSources.set(route.file, file.text);
+  }
+
   // Text is no longer needed: the call graph and index have everything derived.
   for (const file of pass) file.text = null;
+
+  // Coupling and ownership come from history. Read after components exist,
+  // because the interesting question is which pairs cross a component boundary.
+  progress('Reading change history', 92);
+  const fileToComponent = new Map<string, { id: string; name: string }>();
+  for (const component of components) {
+    for (const file of component.files) fileToComponent.set(file, { id: component.id, name: component.name });
+  }
+  const coupling = await computeCoupling({
+    root,
+    totalCommits: git.commitCount,
+    knownPaths: new Set(paths),
+    fileToComponent,
+  });
 
   progress('Scoring architecture', 93);
   const edges = componentEdges(components, imports);
@@ -209,7 +313,19 @@ export async function analyzeRepo(rootInput: string, options: AnalyzeOptions = {
 
   const concepts = extractConcepts(pass);
   const dataFlows = inferFlows(components, edges, entrypoints, dependencies);
-  const hotspots = computeHotspots(pass, components, git.churn);
+  const hotspots = computeHotspots(pass, components, git.churn, complexity);
+
+  // Which code the tests reach. Answering this requires knowing what every test
+  // touches, which is exactly what static analysis can do and reading cannot.
+  const tests = computeTestCoverage({
+    files: pass.map((file) => file.entry),
+    imports,
+    calls: callGraph.calls,
+    symbols: callGraph.symbols,
+    components,
+    testCaseFiles,
+    churn: new Map(git.churn.map((entry) => [entry.path, entry.commits])),
+  });
 
   const readmePath = paths.find((p) => /^readme(\.md|\.mdx|\.rst|\.txt)?$/i.test(p.split('/').pop() ?? ''));
   let readme: string | null = null;
@@ -231,6 +347,25 @@ export async function analyzeRepo(rootInput: string, options: AnalyzeOptions = {
     componentCount: components.length,
     maxDepth: modules.reduce((max, m) => Math.max(max, m.depth), 0),
   };
+
+  // What the repository does not say about itself. Every finding is derived from
+  // a fact already measured above and phrased as a question rather than a
+  // verdict, because a repository can be missing something for good reasons.
+  progress('Looking for what is absent', 95);
+  const gaps = computeGaps({
+    files: pass.map((file) => ({ path: file.path, category: file.entry.category })),
+    ops,
+    tests,
+    dataModel,
+    complexity,
+    components,
+    dependencies,
+    routes: callGraph.routes,
+    readme,
+    deadCode: callGraph.deadCode ?? [],
+    sources: [...routeSources].map(([path, text]) => ({ path, text })),
+    sourceLoc: stats.loc,
+  });
 
   if (pass.length === 0) warnings.push('No files were analysed. Is this an empty directory?');
 
@@ -257,6 +392,13 @@ export async function analyzeRepo(rootInput: string, options: AnalyzeOptions = {
     routes: callGraph.routes,
     deadCode: callGraph.deadCode,
     hotspots,
+    tests,
+    ops,
+    coupling,
+    complexity,
+    conventions,
+    dataModel,
+    gaps,
     readme,
     docs,
     warnings,
@@ -1126,23 +1268,56 @@ function buildDependencies(
   return accumulator.finish();
 }
 
-function computeHotspots(pass: PassFile[], components: Component[], churn: FileChurn[]): Hotspot[] {
+function computeHotspots(pass: PassFile[], components: Component[], churn: FileChurn[], complexity: ComplexityReport): Hotspot[] {
   if (churn.length === 0) return [];
   const byPath = new Map(pass.map((file) => [file.path, file]));
+  const measured = new Map(complexity.files.map((file) => [file.path, file]));
   const componentOf = (filePath: string): string[] =>
     components.filter((component) => component.files.includes(filePath)).map((component) => component.name);
 
   return churn
-    .filter((entry) => byPath.has(entry.path))
+    // Lockfiles and generated output are edited constantly by tooling, which
+    // says nothing about whether they are hard to change.
+    .filter((entry) => byPath.has(entry.path) && !isNoiseFile(entry.path))
     .map((entry) => {
       const file = byPath.get(entry.path);
       const loc = file?.entry.lines ?? 0;
-      // Churn alone favours tiny files edited constantly; size alone favours
-      // untouched monoliths. The product is where both are high.
+      const measuredFile = measured.get(entry.path);
+      if (measuredFile) {
+        // Churn alone favours tiny files edited constantly; complexity alone
+        // favours convoluted code nobody touches. Where both are high is where a
+        // new leader should look.
+        return {
+          path: entry.path,
+          score: measuredFile.score,
+          commits: entry.commits,
+          loc,
+          branches: measuredFile.branches,
+          maxDepth: measuredFile.maxDepth,
+          measured: true,
+          components: componentOf(entry.path),
+        };
+      }
+      // No function bodies to measure — a churned config, stylesheet or asset.
+      // Size is the only honest signal available, and saying so is better than
+      // reporting zero complexity for a file that is in fact edited constantly.
       const score = entry.commits * Math.log10(loc + 10);
-      return { path: entry.path, score: Number(score.toFixed(2)), commits: entry.commits, loc, components: componentOf(entry.path) };
+      return {
+        path: entry.path,
+        score: Number(score.toFixed(2)),
+        commits: entry.commits,
+        loc,
+        branches: 0,
+        maxDepth: 0,
+        measured: false,
+        components: componentOf(entry.path),
+      };
     })
-    .sort((a, b) => b.score - a.score)
+    // A measured file is ranked on complexity, an unmeasured one only on size.
+    // The two numbers are not on the same scale, so mixing them by value would
+    // rank a 4,500-line lockfile above the branchiest function in the codebase.
+    // Measured files come first; the rest follow, labelled as unmeasured.
+    .sort((a, b) => Number(b.measured) - Number(a.measured) || b.score - a.score)
     .slice(0, 30);
 }
 

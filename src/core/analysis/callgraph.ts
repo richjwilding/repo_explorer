@@ -95,6 +95,20 @@ export function extractCalls(bodyText: string, baseLine: number, family: Languag
     for (const m of bodyText.matchAll(/\.(?:map|filter|forEach|then|catch|reduce|some|every|find)\(\s*([A-Za-z_$][\w$]*)\s*[,)]/g)) {
       push(m[1], undefined, 'callback', m.index ?? 0);
     }
+
+    // JSX element usage. Writing `<DiagramView />` is how one component renders
+    // another, but it is not a call expression, so the call graph used to miss
+    // the primary composition mechanism of every React codebase. Everything
+    // downstream read that absence as "nothing renders this" — components looked
+    // unreachable, and `callers_of <Component>` returned nothing.
+    //
+    // The lookbehind keeps generics out: in `Map<SymbolRecord, string>` the `<`
+    // follows an identifier character, whereas a JSX element never does.
+    for (const m of bodyText.matchAll(/(?<![A-Za-z0-9_$.])<([A-Z][\w$]*)(?:\.([A-Z][\w$]*))?[\s/>]/g)) {
+      const receiver = m[2] ? m[1] : undefined;
+      const name = m[2] ?? m[1];
+      push(name, receiver, 'jsx', m.index ?? 0);
+    }
   }
 
   return calls;

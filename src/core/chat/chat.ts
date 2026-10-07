@@ -2,9 +2,10 @@ import type { ChatSession, ChatTurn, Citation, LlmMessage } from '../types.js';
 import type { RepoContext } from '../service.js';
 import { buildChatMessages, titlePromptMessages } from './prompts.js';
 import { retrieve, type RetrievalResult } from './retrieval.js';
+import { investigate, shouldInvestigate, type Investigation } from './agent.js';
+import type { AgentStep } from '../agent/explorer.js';
 import { buildRepoDigest } from '../explain/digest.js';
 import { log } from '../logger.js';
-import { truncate } from '../util/text.js';
 import { uid } from '../util/id.js';
 
 export interface AskOptions {
@@ -14,8 +15,15 @@ export interface AskOptions {
   onToken?: (delta: string) => void;
   onCitations?: (citations: Citation[]) => void;
   onStatus?: (message: string) => void;
+  /** Progress through the investigation, for the visible trace. */
+  onStep?: (step: AgentStep) => void;
   /** Override the automatic retrieval (used when the user pins files). */
   focusFiles?: string[];
+  /**
+   * Force investigation on or off. Left unset, a question that asks about
+   * behaviour across the codebase is investigated and a plain lookup is not.
+   */
+  investigate?: boolean;
 }
 
 export interface AskResult {
@@ -23,6 +31,8 @@ export interface AskResult {
   citations: Citation[];
   session: ChatSession;
   retrieval: RetrievalResult;
+  /** Tool calls the agent made before answering, if any. */
+  steps: AgentStep[];
 }
 
 const MAX_HISTORY_TURNS = 8;
@@ -46,12 +56,34 @@ export async function askRepo(ctx: RepoContext, options: AskOptions): Promise<As
     focusFiles: options.focusFiles,
   });
 
+  // A question about behaviour gets followed through the call graph; a question
+  // that names something specific is answered from the excerpts, which is both
+  // faster and less likely to wander.
+  const wantsInvestigation = options.investigate ?? shouldInvestigate(question);
+  let investigation: Investigation = { observations: [], steps: [], immediate: true };
+  if (wantsInvestigation) {
+    options.onStatus?.('Deciding what to look at');
+    investigation = await investigate(ctx, {
+      question,
+      history,
+      seed: retrieval.context,
+      seedFiles: retrieval.files,
+      signal: options.signal,
+      onStatus: options.onStatus,
+      onStep: options.onStep,
+      seedText:
+        `# Question\n\n${question}\n\n---\n\n` +
+        `The keyword search already found these excerpts:\n\n${retrieval.context || '(nothing relevant found)'}`,
+    });
+  }
+
   const messages = buildChatMessages({
     model: ctx.model,
     digest: buildRepoDigest(ctx.model, { maxChars: 5000 }),
     retrieved: retrieval.context,
     history,
     question,
+    observations: investigation.observations,
   });
 
   let answer = '';
@@ -89,7 +121,7 @@ export async function askRepo(ctx: RepoContext, options: AskOptions): Promise<As
     options.onToken?.(answer);
   }
 
-  const citations = resolveCitations(ctx, answer, retrieval);
+  const citations = resolveCitations(ctx, answer, retrieval, investigation.steps);
   options.onCitations?.(citations);
 
   const now = new Date().toISOString();
@@ -101,7 +133,7 @@ export async function askRepo(ctx: RepoContext, options: AskOptions): Promise<As
   }
   await ctx.store.writeChat(ctx.model.repo.id, session);
 
-  return { answer, citations, session, retrieval };
+  return { answer, citations, session, retrieval, steps: investigation.steps };
 }
 
 async function loadOrCreateSession(ctx: RepoContext, sessionId: string | undefined): Promise<ChatSession> {
@@ -121,16 +153,43 @@ async function loadOrCreateSession(ctx: RepoContext, sessionId: string | undefin
 }
 
 /**
- * Turn `[path:12-30]` markers in the answer into structured citations.
- * Only paths that exist in the analysis are kept, so the UI never links to a
- * file that isn't there.
+ * The line ranges the agent actually looked at, as citable ranges.
+ *
+ * `read_file` is the only tool that reports precise ranges; the others report
+ * the file they answered from, which is still worth offering the reader.
  */
-export function resolveCitations(ctx: RepoContext, answer: string, retrieval: RetrievalResult): Citation[] {
+function citationsFromSteps(steps: AgentStep[]): Citation[] {
+  const out: Citation[] = [];
+  for (const step of steps) {
+    const args = step.args as { path?: unknown; startLine?: unknown; endLine?: unknown };
+    if (typeof args?.path !== 'string') continue;
+    const startLine = typeof args.startLine === 'number' ? args.startLine : 1;
+    const endLine = typeof args.endLine === 'number' ? args.endLine : startLine + 40;
+    out.push({ path: args.path, startLine, endLine, snippet: '' });
+  }
+  return out;
+}
+
+/**
+ * Turn `[path:12-30]` markers in the answer into structured citations.
+ *
+ * Only paths that exist in the analysis are kept, so the UI never links to a
+ * file that isn't there. The evidence the agent gathered counts too: without it
+ * a citation to something the agent read from the call graph — which is exactly
+ * the case keyword search could not have reached — would be discarded and the
+ * reader would lose the reference.
+ */
+export function resolveCitations(
+  ctx: RepoContext,
+  answer: string,
+  retrieval: RetrievalResult,
+  steps: AgentStep[] = [],
+): Citation[] {
   const known = new Map(ctx.model.files.map((f) => [f.path, f]));
-  const retrievedByPath = new Map<string, Citation[]>();
-  for (const citation of retrieval.citations) {
-    if (!retrievedByPath.has(citation.path)) retrievedByPath.set(citation.path, []);
-    (retrievedByPath.get(citation.path) as Citation[]).push(citation);
+  const byPath = new Map<string, Citation[]>();
+  for (const citation of [...retrieval.citations, ...citationsFromSteps(steps)]) {
+    if (!byPath.has(citation.path)) byPath.set(citation.path, []);
+    (byPath.get(citation.path) as Citation[]).push(citation);
   }
 
   const found = new Map<string, Citation>();
@@ -144,7 +203,7 @@ export function resolveCitations(ctx: RepoContext, answer: string, retrieval: Re
     const endLine = endRaw ? Number.parseInt(endRaw, 10) : Math.min(startLine + 12, entry.lines);
     const key = `${normalised}:${startLine}-${endLine}`;
     if (found.has(key)) continue;
-    const overlapping = (retrievedByPath.get(normalised) ?? []).find((c) => c.startLine <= endLine && c.endLine >= startLine);
+    const overlapping = (byPath.get(normalised) ?? []).find((c) => c.startLine <= endLine && c.endLine >= startLine);
     found.set(key, {
       path: normalised,
       startLine,
@@ -154,9 +213,10 @@ export function resolveCitations(ctx: RepoContext, answer: string, retrieval: Re
   }
 
   if (found.size === 0) {
-    // The model answered without inline citations: fall back to the most
-    // relevant retrieved ranges so the reader still has somewhere to look.
-    for (const citation of retrieval.citations.slice(0, 4)) {
+    // The model answered without inline citations: fall back to the ranges it
+    // actually consulted. A file the agent went and read for this question is
+    // better evidence than a keyword match, so those come first.
+    for (const citation of [...citationsFromSteps(steps), ...retrieval.citations].slice(0, 4)) {
       const key = `${citation.path}:${citation.startLine}-${citation.endLine}`;
       if (!found.has(key)) found.set(key, citation);
     }
@@ -165,8 +225,22 @@ export function resolveCitations(ctx: RepoContext, answer: string, retrieval: Re
   return [...found.values()].slice(0, 12);
 }
 
+/**
+ * A readable session title from the question, cut at a word boundary.
+ *
+ * The previous version truncated to a character count and dropped the ellipsis,
+ * so a title ended mid-word — "…what actually happens betwee".
+ */
+function shortenQuestion(question: string): string {
+  const clean = question.replace(/\s+/g, ' ').trim();
+  if (clean.length <= 60) return clean;
+  const clipped = clean.slice(0, 60);
+  const boundary = clipped.lastIndexOf(' ');
+  return `${(boundary > 30 ? clipped.slice(0, boundary) : clipped).replace(/[,;:.]+$/, '')}…`;
+}
+
 async function deriveTitle(ctx: RepoContext, question: string, answer: string, signal?: AbortSignal): Promise<string> {
-  const fallback = truncate(question.replace(/\s+/g, ' '), 60, '');
+  const fallback = shortenQuestion(question);
   try {
     const result = await ctx.provider.complete({
       messages: titlePromptMessages(question, answer),
@@ -193,6 +267,9 @@ export async function streamAnswer(
       ...options,
       onToken: (delta) => onEvent({ type: 'token', delta }),
       onStatus: (message) => onEvent({ type: 'status', message }),
+      // Making the investigation visible is the point: the reader can see which
+      // files were consulted before deciding how much to trust the answer.
+      onStep: (step) => onEvent({ type: 'step', step }),
     });
     onEvent({ type: 'citations', citations: result.citations });
     onEvent({ type: 'done', sessionId: result.session.id, title: result.session.title });
