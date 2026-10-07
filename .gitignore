@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Secrets — the app reads credentials from ~/.repo-explorer/.env, and a stray
+# .env here would be committed by accident.
+.env
+.env.*
+!.env.example
+
+# Local app state if anyone points it at this directory
+.repo-explorer/
+
+# Test and coverage output
+coverage/
+.nyc_output/
+*.log
+npm-debug.log*
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*~
+Thumbs.db
+
+# AI tooling task board (kept locally; remove this line to track it)
+.kb/
+
+# Scratch files the dev scripts write
+*.mmd.out
+/tmp/
