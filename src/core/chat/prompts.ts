@@ -382,6 +382,6 @@ ${history ? `### History of the touched files\n${history.slice(0, 3000)}\n` : ''
 ### Diff
 
 \`\`\`diff
-${diff.slice(0, 80_000)}
+${diff.slice(0, 45_000)}
 \`\`\``;
 }

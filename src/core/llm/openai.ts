@@ -172,6 +172,10 @@ export class OpenAiProvider implements LlmProvider {
     if (!content.trim() && reasoning.trim()) {
       log.debug('the model returned only reasoning and no answer; using the reasoning text as a fallback');
     }
+    const finishReason = res.data?.choices?.[0]?.finish_reason;
+    if (finishReason === 'length') {
+      log.warn('the model ran out of output tokens; its answer was cut off', { model, chars: (content || reasoning).length });
+    }
     return {
       text: content.trim() ? content : reasoning,
       model: res.data?.model ?? model,
@@ -179,6 +183,7 @@ export class OpenAiProvider implements LlmProvider {
       usage: res.data?.usage
         ? { prompt: res.data.usage.prompt_tokens ?? 0, completion: res.data.usage.completion_tokens ?? 0 }
         : undefined,
+      finishReason,
     };
   }
 

@@ -625,6 +625,12 @@ export interface Explainer {
   scope?: ExplainerScope;
   /** True when produced without an LLM (deterministic fallback). */
   degraded?: boolean;
+  /**
+   * Why a written explanation is absent, in the reader's terms. The reader used
+   * to be told the model "was unavailable or did not return something usable",
+   * which was often wrong and always unhelpful.
+   */
+  degradedReason?: string;
   tokens?: { prompt: number; completion: number };
 }
 
@@ -812,6 +818,12 @@ export interface LlmResult {
   model: string;
   provider: string;
   usage?: LlmUsage;
+  /**
+   * Why the provider stopped. `'length'` means the answer was cut off by the
+   * output limit, which is the difference between a model that refused to write
+   * an explainer and one that wrote too much of one.
+   */
+  finishReason?: string;
 }
 
 export interface LlmStreamChunk {

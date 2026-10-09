@@ -1,6 +1,7 @@
-import type { Change, Component, Explainer, ExplainerKind, ExplainerTarget, NextRelation } from '../types.js';
+import type { Change, ChangeFile, Component, Explainer, ExplainerKind, ExplainerTarget, NextRelation } from '../types.js';
 import type { RepoContext } from '../service.js';
 import { buildRepoDigest } from './digest.js';
+import { isNoiseFile } from '../analysis/languages.js';
 import { changeSeed } from '../chat/prompts.js';
 import { explore, type AgentStep, type AgentTask } from '../agent/explorer.js';
 import {
@@ -277,9 +278,35 @@ async function getOrCreate(
     log.warn(`explainer generation failed for ${id}:`, error instanceof Error ? error.message : error);
     options.onStatus?.(`Falling back to the structural outline (${error instanceof Error ? error.message : String(error)})`);
     const fallback = await buildStructural();
+    fallback.degraded = true;
+    fallback.degradedReason = describeGenerationFailure(error);
     await ctx.store.writeExplainer(ctx.model.repo.id, fallback);
     return fallback;
   }
+}
+
+/**
+ * Why a written explanation is missing, in terms the reader can act on.
+ *
+ * The reader used to be told the model "was unavailable or did not return
+ * something usable", which was usually the wrong one of the two and gave no clue
+ * whether trying again was worth it.
+ */
+export function describeGenerationFailure(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/budget without producing|cancelled/i.test(message)) {
+    return 'The agent spent its whole investigation budget without producing a written explanation. That is usually transient — regenerating normally succeeds.';
+  }
+  if (/no provider|not configured|no api key|credential|unauthor|401|403/i.test(message)) {
+    return 'No language model is available: no provider is configured, or the credential was rejected. Check the model settings, then regenerate.';
+  }
+  if (/timed out|timeout|ECONNREFUSED|ENOTFOUND|fetch failed|socket hang up/i.test(message)) {
+    return 'The language model could not be reached. This is usually a temporary network or provider problem.';
+  }
+  if (/json|unparseable|unexpected token/i.test(message)) {
+    return `The language model replied with something that could not be read as an explainer (${message}). Trying again often works.`;
+  }
+  return message;
 }
 
 /**
@@ -473,26 +500,79 @@ function nextFromTarget(ctx: RepoContext, target: ExplainerTarget): Explainer['n
  * ------------------------------------------------------------------ */
 
 
-const MAX_TOTAL_DIFF_CHARS = 110_000;
+// A change explainer reads the diff, and a diff of a large commit is mostly
+// noise: lockfiles, generated output, and whole new files that the model then
+// has to hold alongside everything else. A representative slice explained well
+// beats every line explained badly, and the agent can read more with tools.
+const MAX_TOTAL_DIFF_CHARS = 45_000;
 
-async function buildChangeContext(change: Change): Promise<{ diff: string }> {
+/**
+ * Which parts of a diff a change explainer is given.
+ *
+ * Two decisions, both about what the model can actually hold: lockfiles and
+ * generated output are dropped (a dependency bump is otherwise mostly a lockfile
+ * diff), and the rest are ranked by how much they changed, because the biggest
+ * change is usually the one the explainer is about. What is left out is stated
+ * rather than silently missing.
+ */
+/**
+ * Files a change explainer does not need the diff of.
+ *
+ * `isNoiseFile` covers lockfiles and generated files as the *analysis* sees them,
+ * but a diff comes from git and so can contain paths the analysis never scanned:
+ * a build output directory that is committed, a minified bundle, a binary asset.
+ * None of them say anything about what a change means.
+ */
+const BUILD_OUTPUT_RE = /(^|\/)(dist|build|out|output|coverage|vendor|target|\.next|\.nuxt|\.svelte-kit|__generated__)(\/|$)/i;
+const BINARY_ASSET_RE = /\.(png|jpe?g|gif|webp|ico|bmp|woff2?|ttf|eot|pdf|zip|tar|gz|tgz|jar|so|dylib|dll|exe|wasm)$/i;
+
+export function isUninterestingForDiff(path: string): boolean {
+  if (isNoiseFile(path)) return true;
+  if (BUILD_OUTPUT_RE.test(path)) return true;
+  if (BINARY_ASSET_RE.test(path)) return true;
+  if (/\.(min|bundle)\.(js|css|mjs|cjs)$/i.test(path)) return true;
+  return false;
+}
+
+export function selectChangeDiff(files: ChangeFile[], budget = MAX_TOTAL_DIFF_CHARS): string {
   const diffParts: string[] = [];
   let used = 0;
-  const ranked = [...change.files].sort((a, b) => b.additions + b.deletions - (a.additions + a.deletions));
+  const skipped: string[] = [];
+  const ranked = [...files]
+    .filter((file) => {
+      if (isUninterestingForDiff(file.path)) {
+        skipped.push(file.path);
+        return false;
+      }
+      return true;
+    })
+    .sort((a, b) => b.additions + b.deletions - (a.additions + a.deletions));
+
+  let omittedForLength = 0;
   for (const file of ranked) {
     if (!file.patch) continue;
-    if (used + file.patch.length > MAX_TOTAL_DIFF_CHARS) {
-      const remaining = MAX_TOTAL_DIFF_CHARS - used;
-      if (remaining < 2000) break;
+    if (used + file.patch.length > budget) {
+      const remaining = budget - used;
+      if (remaining < 2000) {
+        omittedForLength += 1;
+        continue;
+      }
       diffParts.push(truncate(file.patch, remaining, '\n… [diff truncated]'));
-      used = MAX_TOTAL_DIFF_CHARS;
-      break;
+      used = budget;
+      continue;
     }
     diffParts.push(file.patch);
     used += file.patch.length;
   }
-  if (ranked.length > diffParts.length) diffParts.push(`\n… ${ranked.length - diffParts.length} further file diff(s) omitted for length.`);
-  return { diff: diffParts.join('\n') };
+  if (omittedForLength > 0) diffParts.push(`\n… ${omittedForLength} further file diff(s) omitted for length.`);
+  if (skipped.length > 0) {
+    diffParts.push(`\n… ${skipped.length} file diff(s) omitted as lockfiles, generated output or binary assets: ${skipped.slice(0, 6).join(', ')}`);
+  }
+  return diffParts.join('\n');
+}
+
+async function buildChangeContext(change: Change): Promise<{ diff: string }> {
+  return { diff: selectChangeDiff(change.files) };
 }
 
 async function buildChangeHistory(ctx: RepoContext, change: Change): Promise<string> {

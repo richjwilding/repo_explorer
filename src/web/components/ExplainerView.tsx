@@ -211,7 +211,8 @@ export function ExplainerView({
           <div className="callout callout-tip">
             <h4>This is the structural outline, not a written explanation</h4>
             <p>
-              It was produced by static analysis alone — either a language model was unavailable, or it did not return something usable.{' '}
+              {explainer.degradedReason ??
+                'It was produced by static analysis alone — either a language model was unavailable, or it did not return something usable.'}{' '}
               <button type="button" className="link-button" onClick={onRegenerate}>
                 Try generating again
               </button>

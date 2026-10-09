@@ -467,6 +467,26 @@ Findings are ordered by how much they usually matter, and every expectation that
 *is* met is listed alongside them, so the report reads as a balance rather than a
 list of complaints.
 
+## When an explanation cannot be written
+
+If the model cannot produce one, the app says which of several things happened
+rather than offering a guess:
+
+- the agent used its whole investigation budget without writing — usually
+  transient, and it says so;
+- no provider is configured, or the credential was rejected;
+- the provider could not be reached;
+- the reply could not be read as an explainer.
+
+The structural outline is always shown, clearly labelled as an outline rather
+than an explanation, so a failure degrades to something readable instead of an
+empty panel.
+
+Before it falls back, it tries hard not to: the investigation loop never abandons
+work it has already done on the grounds that the model stopped responding, and
+the recovery attempts run on a much smaller context than the one that failed —
+the seed and a note of what was verified, rather than the whole transcript.
+
 ## Repositories without git
 
 Architecture and source explanations work on any directory, tracked or not. Commit, PR and diff explainers need

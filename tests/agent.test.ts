@@ -196,6 +196,23 @@ async function runLoop(responses: string[], maxSteps = 5) {
   return { result, steps, provider };
 }
 
+/**
+ * An explainer whose prose quotes prose — the single largest cause of good
+ * responses being discarded, because the quotes are unescaped and the result is
+ * not valid JSON.
+ */
+function quotedExplainer(): string {
+  return (
+    '{"final":{"title":"Eight analyses","tldr":"It says "no CI" here.",' +
+    '"sections":[{"type":"prose","title":"Background","markdown":"The tool reports "no CI definitions found"."},' +
+    '{"type":"prose","title":"Detail","markdown":"It names "PostgreSQL" as a store."},' +
+    '{"type":"list","title":"Parts","items":[{"term":"gaps","detail":"Reports what is "absent"."}]},' +
+    '{"type":"callout","title":"Edge","variant":"edge","markdown":"A "digest" budget is not a finding."},' +
+    '{"type":"prose","title":"More","markdown":"Enough sections to be usable."}],' +
+    '"next":[],"sources":[{"path":"apps/api/src/routes.ts","startLine":1,"endLine":4}]}}'
+  );
+}
+
 describe('exploration loop', () => {
   it('investigates with tools and then writes the explainer', async () => {
     const { result, steps } = await runLoop([...INVESTIGATE, finalExplainer()]);
@@ -224,6 +241,23 @@ describe('exploration loop', () => {
     const { result } = await runLoop([...INVESTIGATE, thinExplainer(), 'not json']);
     expect(result.explainer.title).toBe('Thin');
     expect(result.explainer.sections.length).toBeGreaterThan(0);
+  }, 30_000);
+
+  it('writes up the investigation when the model stops producing usable turns', async () => {
+    // Three unparseable replies used to abort the whole run, which skipped the
+    // compact write path and left the reader with a static outline even though
+    // everything needed for an explainer had already been read.
+    const { result } = await runLoop([...INVESTIGATE, 'not json at all', 'still not json', 'nor this', finalExplainer()], 5);
+    expect(result.explainer.title).toBe('Fixture architecture');
+    expect(result.truncated).toBe(true);
+    expect(result.steps.length).toBeGreaterThanOrEqual(3);
+  }, 30_000);
+
+  it('keeps an explainer whose prose contains unescaped quotes', async () => {
+    const { result } = await runLoop([...INVESTIGATE, quotedExplainer()]);
+    expect(result.explainer.title).toBe('Eight analyses');
+    expect(result.explainer.tldr).toBe('It says "no CI" here.');
+    expect(result.explainer.sections[0].type).toBe('prose');
   }, 30_000);
 
   it('accepts a model that invents a "final" tool', async () => {

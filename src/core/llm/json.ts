@@ -153,6 +153,52 @@ function closeUnbalanced(input: string): string {
   return out;
 }
 
+/**
+ * Escape double quotes a model left unescaped inside a string value.
+ *
+ * A model writing prose produces `"text": "It says "no CI" here."`, which is not
+ * valid JSON, and none of the repairs above can make it valid — the failure is
+ * inside a string, not in the structure around it. This was the single largest
+ * cause of otherwise-good explainers being thrown away.
+ *
+ * A quote is a *closing* quote only when JSON structure follows it: the end of
+ * the document, or one of `:`, `,`, `}`, `]` after optional whitespace. Anything
+ * else is a quote the model meant literally, and gets escaped. Applied only as a
+ * later repair variant, so it can never damage JSON that already parses.
+ */
+export function escapeInnerQuotes(text: string): string {
+  let out = '';
+  let inString = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (!inString) {
+      out += char;
+      if (char === '"') inString = true;
+      continue;
+    }
+    if (char === '\\') {
+      out += char + (text[index + 1] ?? '');
+      index += 1;
+      continue;
+    }
+    if (char !== '"') {
+      out += char;
+      continue;
+    }
+    let lookahead = index + 1;
+    while (lookahead < text.length && /\s/.test(text[lookahead])) lookahead += 1;
+    const next = text[lookahead];
+    const closes = next === undefined || next === ':' || next === ',' || next === '}' || next === ']';
+    if (closes) {
+      out += '"';
+      inString = false;
+    } else {
+      out += '\\"';
+    }
+  }
+  return out;
+}
+
 export function extractJson(text: string): unknown | null {
   if (!text) return null;
   const candidates: string[] = [];
@@ -169,6 +215,11 @@ export function extractJson(text: string): unknown | null {
         closeUnbalanced(repair(attempt)),
         closeUnbalanced(escapeControlCharsInStrings(repair(attempt))),
         escapeControlCharsInStrings(repair(attempt)),
+        // Inner quotes last: this repair rewrites string contents, so it is only
+        // worth trying once every structural repair has failed.
+        escapeInnerQuotes(repair(attempt)),
+        escapeInnerQuotes(escapeControlCharsInStrings(repair(attempt))),
+        closeUnbalanced(escapeInnerQuotes(escapeControlCharsInStrings(repair(attempt)))),
       ]) {
         try {
           return JSON.parse(variant);

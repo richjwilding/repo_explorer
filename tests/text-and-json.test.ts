@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { escapeControlCharsInStrings, extractJson, parseJsonLoose, peekJsonStringField, stripFences } from '../src/core/llm/json.js';
+import { escapeControlCharsInStrings, extractJson, parseJsonLoose, peekJsonStringField, stripFences, escapeInnerQuotes} from '../src/core/llm/json.js';
 import { countLines, firstLines, jaccard, splitIdentifier, tokenize, truncate } from '../src/core/util/text.js';
 
 describe('tokenize', () => {
@@ -105,5 +105,61 @@ describe('JSON extraction', () => {
   it('only strips well-formed fences', () => {
     expect(stripFences('```json\n{"a":1}\n```')).toBe('{"a":1}');
     expect(stripFences('{"a":1}')).toBe('{"a":1}');
+  });
+});
+
+describe('repairing quotes the model left unescaped inside strings', () => {
+  const parse = (text: string) => {
+    try {
+      return JSON.parse(escapeInnerQuotes(text)) as unknown;
+    } catch {
+      return null;
+    }
+  };
+
+  it('leaves valid JSON exactly as it was', () => {
+    for (const valid of [
+      '{"a":"b"}',
+      '{"a":["x","y"],"b":1}',
+      '{"a":"he said \\"hi\\" to me"}',
+      '{"plain":"no quotes here"}',
+      '{"a":"ends with a colon:","b":2}',
+      '{"a":"","b":"c"}',
+      '{"a":"has, a comma","b":"and a } brace"}',
+    ]) {
+      expect(JSON.parse(escapeInnerQuotes(valid))).toEqual(JSON.parse(valid));
+    }
+  });
+
+  it('escapes a quote that has no JSON structure after it', () => {
+    const fixed = parse('{"text":"It says "no CI" here."}');
+    expect(fixed).toEqual({ text: 'It says "no CI" here.' });
+  });
+
+  it('handles several offending quotes in one value', () => {
+    const fixed = parse('{"t":"a "b" c "d" e","n":1}');
+    expect(fixed).toEqual({ t: 'a "b" c "d" e', n: 1 });
+  });
+
+  it('works inside nested arrays and objects', () => {
+    const fixed = parse('{"sections":[{"type":"prose","text":"the "digest" bug"},{"type":"list","items":["a "b" c"]}]}');
+    expect(fixed).toEqual({ sections: [{ type: 'prose', text: 'the "digest" bug' }, { type: 'list', items: ['a "b" c'] }] });
+  });
+
+  it('does not confuse a key for a value', () => {
+    const fixed = parse('{"outer":{"inner":"v"}}');
+    expect(fixed).toEqual({ outer: { inner: 'v' } });
+  });
+
+  it('is what actually rescues an explainer the other repairs cannot', () => {
+    // The real shape that was being discarded: prose that quotes prose. This
+    // response is not valid JSON, and `JSON.parse` on it throws — the rescue has
+    // to come from the repair chain inside `extractJson`.
+    const response = `{"final":{"title":"Eight analyses","tldr":"It says "no CI" here.","sections":[{"type":"prose","title":"Background","text":"The tool reports "no CI definitions found"."}]}}`;
+    expect(() => JSON.parse(response)).toThrow();
+    const rescued = parseJsonLoose<{ final: { tldr: string; sections: { text: string }[] } }>(response);
+    expect(rescued).not.toBeNull();
+    expect(rescued?.final.tldr).toBe('It says "no CI" here.');
+    expect(rescued?.final.sections[0].text).toBe('The tool reports "no CI definitions found".');
   });
 });

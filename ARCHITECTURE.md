@@ -99,6 +99,14 @@ Dependencies now come from four kinds of evidence, in descending order of author
 
 | Failure mode | What went wrong | What prevents it |
 | --- | --- | --- |
+| Giving up instead of writing up | Three unparseable model replies, or three replies that named no tool, threw from inside the investigation loop — which skipped the write path entirely, so a run that had already read everything it needed ended as a static outline | Every early bail-out leaves the loop and hands over to the compact write; only the write itself failing is fatal |
+| Retrying on the context that caused the failure | The recovery attempt replayed the whole transcript: tens of thousands of characters of diff plus every observation | The recovery sends the seed and a short note of what was verified, then a second attempt with the seed alone |
+| A terse retry that contradicted the required structure | The recovery asked for "4-6 sections" while the change scope requires eight, so it produced answers that met the request and skipped the structure | The retry names no count and requires every section the scope lists |
+| Quoting prose thrown away as unparseable | A model writing about quotes produces `"tldr":"It says "no CI" here."`, which is not valid JSON — and no structural repair can fix a failure inside a string. This was the largest single cause of good explainers being discarded | `escapeInnerQuotes` treats a quote as closing only when JSON structure follows it, applied last so it cannot damage JSON that already parses |
+| Telling the reader the wrong reason | A budget exhaustion was reported as "a language model was unavailable, or it did not return something usable" — usually the wrong one of the two, and no clue whether retrying would help | Failures are classified, and the reader is told which one happened |
+| A diff no model can hold | A large commit's diff reached 409,000 characters; the explainer was given 80,000 of it | 45,000, lockfiles, build output, bundles and binary assets excluded, and what was left out is stated |
+
+| --- | --- | --- |
 | An absence claimed in a dimension the project does not have | "No migrations" is meaningless for a repository with no database | Every check returns null when it does not apply, so only real absences are reported |
 | A fixed window reading the next handler | A 40-line window from a route handler ran into the following route's error handling, so a handler with none of its own looked handled | The window ends at the next handler in the same file |
 | A weak finding dressed as a strong one | "No observability library" fires for a library or a script, which has no production output to look at | The check requires something actually deployed — a container, infrastructure, or routes |

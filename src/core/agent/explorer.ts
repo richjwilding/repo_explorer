@@ -224,7 +224,17 @@ export async function explore(ctx: RepoContext, task: AgentTask, options: Explor
       consecutiveFailures += 1;
       log.debug(`the model did not return parseable JSON (attempt ${consecutiveFailures}). Raw start: ${raw.slice(0, 300)}`);
       if (consecutiveFailures >= 3) {
-        throw new Error('The model did not produce a valid JSON action or explainer.');
+        // Same reasoning as the unrecognised-tool branch below: three unparseable
+        // replies mean this model call is not going to produce a turn, but the
+        // investigation so far is still worth writing up on a smaller context.
+        // Throwing from here skipped that recovery and turned a recoverable run
+        // into a static outline.
+        log.warn('the model returned unparseable JSON three times; ending the investigation early', {
+          scope: task.scope,
+          steps: steps.length,
+          rawStart: raw.slice(0, 200),
+        });
+        break;
       }
       messages.push({ role: 'assistant', content: candidate });
       messages.push({
@@ -291,7 +301,15 @@ export async function explore(ctx: RepoContext, task: AgentTask, options: Explor
 
       if (!explainerIsUsable(explainer)) {
         consecutiveFailures += 1;
-        if (consecutiveFailures >= 2) throw new Error('The model produced an explainer with no usable sections.');
+        if (consecutiveFailures >= 2) {
+          // A model that keeps emitting empty explainers is done for this run;
+          // hand over to the compact write rather than abandoning the work.
+          log.warn('the model produced no usable explainer sections twice; ending the investigation early', {
+            scope: task.scope,
+            steps: steps.length,
+          });
+          break;
+        }
         messages.push({ role: 'assistant', content: candidate });
         messages.push({
           role: 'user',
@@ -408,7 +426,13 @@ export async function explore(ctx: RepoContext, task: AgentTask, options: Explor
       consecutiveFailures += 1;
       log.debug(`unrecognised agent response: ${raw.slice(0, 400)}`);
       if (consecutiveFailures >= 3) {
-        throw new Error('The model did not choose a tool or emit a final explainer.');
+        // Do not give up here. The model has stopped producing usable turns, but
+        // everything it read is still worth writing up — and throwing from inside
+        // the loop skipped the compact write path below entirely, which is why an
+        // otherwise recoverable run ended as a static outline. Leaving the loop
+        // hands over to a much smaller context, where the model answers reliably.
+        log.warn('the model stopped producing usable turns; ending the investigation early', { scope: task.scope, steps: steps.length });
+        break;
       }
       messages.push({ role: 'assistant', content: candidate });
       messages.push({
@@ -474,18 +498,31 @@ export async function explore(ctx: RepoContext, task: AgentTask, options: Explor
   }
 
   // Last chance: some models investigate forever and never write. Rather than
-  // discard everything they read, ask once more with no option to use a tool.
+  // discard everything they read, ask again with no option to use a tool — and on
+  // a *compact* context. Replaying the whole transcript was the problem: tens of
+  // thousands of characters of diff plus every observation is what made the model
+  // return something unusable. What it needs to write is the seed and a note of
+  // what it verified, not the raw evidence it already digested.
+  const compactSeed = truncate(task.seed ?? '', 12_000, '\n… [context trimmed]');
+  const investigated = steps.length > 0
+    ? `\n\nWhat you verified during this investigation (${steps.length} tool calls):\n${steps
+        .map((step, position) => `${position + 1}. ${step.tool} — ${truncate(step.summary ?? 'no summary', 240)}`)
+        .join('\n')}`
+    : '';
+  // The demand must not contradict the scope's required sections. Asking for
+  // "4-6 sections" while the change scope requires eight produced explainers that
+  // met the letter of the request and skipped the structure the reader expects.
+  const demand =
+    'You must write the explainer now. Reply with exactly one JSON object: {"final": {...}}. Do not request a tool. ' +
+    'Include every section the scope above lists as required, in order. Keep each one brief — a short paragraph rather ' +
+    'than a long one — but do not omit any, and keep the whole answer short enough that it cannot be cut off.';
+
   try {
     options.onStatus?.('Writing the explainer');
     const finalAttempt = await ctx.provider.complete({
       messages: [
-        ...messages,
-        {
-          role: 'user',
-          content:
-            'You must write the explainer now. Reply with exactly one JSON object: {"final": {...}}. Do not request a tool. ' +
-            'Keep it terse so that it cannot be cut off: 4-6 sections, prose under 150 words each, at most one short code section.',
-        },
+        { role: 'system', content: agentSystemPrompt(task, steps.length) },
+        { role: 'user', content: `${compactSeed}${investigated}\n\n${demand}` },
       ],
       json: true,
       temperature: 0.25,
@@ -494,6 +531,18 @@ export async function explore(ctx: RepoContext, task: AgentTask, options: Explor
     });
     const parsedFinal = parseJsonLoose<Record<string, unknown>>(finalAttempt.text);
     const payload = parsedFinal?.final ?? (parsedFinal && isExplainerShaped(parsedFinal) ? parsedFinal : null);
+    if (!payload) {
+      // Worth logging precisely: "the model did not return something usable" has
+      // several very different causes, and knowing which one decides the fix.
+      log.warn('final attempt produced no explainer payload', {
+        scope: task.scope,
+        responseChars: finalAttempt.text.length,
+        finishReason: finalAttempt.finishReason ?? 'not reported',
+        parsed: parsedFinal === null ? 'unparseable JSON' : `object with keys: ${Object.keys(parsedFinal).slice(0, 8).join(', ')}`,
+        head: finalAttempt.text.slice(0, 400),
+        tail: finalAttempt.text.slice(-200),
+      });
+    }
     if (payload && typeof payload === 'object') {
       const explainer = normalizeExplainer(payload as Record<string, unknown>, {
         kind: task.target.kind,
@@ -504,10 +553,55 @@ export async function explore(ctx: RepoContext, task: AgentTask, options: Explor
         next: task.next ?? [],
         tokens: { prompt: usage.prompt, completion: usage.completion },
       });
+      // Usable is the floor, not the goal: a three-section answer from the terse
+      // retry is worth keeping, but it should first be given the chance to be a
+      // complete one on the bare retry below.
+      if (explainerIsUsable(explainer) && explainer.sections.filter((section) => section.type !== 'quiz').length >= 4) {
+        return { explainer, steps, truncated: true, usage };
+      }
+      log.warn('final attempt produced an unusable explainer', {
+        scope: task.scope,
+        sections: explainer.sections.length,
+        types: explainer.sections.map((section) => section.type).join(','),
+        hasTldr: Boolean(explainer.tldr),
+      });
+    }
+    // Still nothing: one more go with nothing but the seed, which is the smallest
+    // prompt that can still produce a grounded explainer.
+    log.warn('compact final attempt produced nothing usable; retrying with the seed alone', { scope: task.scope });
+    const bare = await ctx.provider.complete({
+      messages: [
+        { role: 'system', content: agentSystemPrompt(task, steps.length) },
+        { role: 'user', content: `${compactSeed}\n\n${demand}` },
+      ],
+      json: true,
+      temperature: 0.2,
+      maxTokens: 12_000,
+      signal: options.signal,
+    });
+    const bareParsed = parseJsonLoose<Record<string, unknown>>(bare.text);
+    const barePayload = bareParsed?.final ?? (bareParsed && isExplainerShaped(bareParsed) ? bareParsed : null);
+    if (barePayload && typeof barePayload === 'object') {
+      const explainer = normalizeExplainer(barePayload as Record<string, unknown>, {
+        kind: task.target.kind,
+        target: task.target,
+        provider: ctx.providerId,
+        model: ctx.modelName,
+        sources,
+        next: task.next ?? [],
+        tokens: { prompt: usage.prompt + (bare.usage?.prompt ?? 0), completion: usage.completion + (bare.usage?.completion ?? 0) },
+      });
       if (explainerIsUsable(explainer)) return { explainer, steps, truncated: true, usage };
     }
+    log.warn('bare final attempt produced no explainer payload', {
+      scope: task.scope,
+      responseChars: bare.text.length,
+      finishReason: bare.finishReason ?? 'not reported',
+      head: bare.text.slice(0, 300),
+    });
   } catch (error) {
     log.warn('final explainer attempt failed', error instanceof Error ? error.message : error);
+    throw error;
   }
 
   throw new Error('Exploration exceeded its budget without producing an explainer.');
