@@ -1,3 +1,4 @@
+import { log } from '../logger.js';
 import type { CredentialSource, LlmMessage, LlmProvider, LlmRequest, LlmResult, LlmStreamChunk, ProviderStatus } from '../types.js';
 import { describeFetchError, getJson, postJson, streamSse } from './http.js';
 
@@ -110,6 +111,21 @@ export class AnthropicProvider implements LlmProvider {
     return status.defaultModel;
   }
 
+  /**
+   * Models that reject `temperature`.
+   *
+   * Newer Claude models removed the parameter and answer "temperature is
+   * deprecated for this model". Shipping a list of model names would rot, so the
+   * first rejection teaches us and the parameter is dropped for that model from
+   * then on. Sending it where it is supported still gives the lower-temperature
+   * output the prompts are written for.
+   */
+  private readonly withoutTemperature = new Set<string>();
+
+  private rejectsTemperature(message: string): boolean {
+    return /temperature/i.test(message) && /(deprecat|unsupported|not support|removed|invalid|unknown)/i.test(message);
+  }
+
   private body(req: LlmRequest, model: string, stream: boolean): Record<string, unknown> {
     const { system, rest } = splitSystem(req.messages);
     const jsonHint = req.json
@@ -118,7 +134,7 @@ export class AnthropicProvider implements LlmProvider {
     return {
       model,
       max_tokens: req.maxTokens ?? 8000,
-      ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+      ...(req.temperature !== undefined && !this.withoutTemperature.has(model) ? { temperature: req.temperature } : {}),
       ...(system ? { system } : {}),
       messages: jsonHint ? [...rest, jsonHint] : rest,
       stream,
@@ -127,11 +143,25 @@ export class AnthropicProvider implements LlmProvider {
 
   async complete(req: LlmRequest): Promise<LlmResult> {
     const model = await this.model(req);
-    const res = await postJson<AnthropicResponse>(`${this.baseUrl}/messages`, this.body(req, model, false), {
+    let res = await postJson<AnthropicResponse>(`${this.baseUrl}/messages`, this.body(req, model, false), {
       headers: this.headers(),
       signal: req.signal,
       timeoutMs: this.timeoutMs,
     });
+    if (!res.ok || res.data?.error) {
+      const message = res.data?.error?.message ?? `HTTP ${res.status} ${res.text.slice(0, 300)}`;
+      // A model that has removed `temperature` should not cost the user an
+      // explanation; retry once without it and remember the model.
+      if (this.rejectsTemperature(message) && !this.withoutTemperature.has(model)) {
+        log.warn('this model rejects temperature; retrying without it', { provider: this.id, model });
+        this.withoutTemperature.add(model);
+        res = await postJson<AnthropicResponse>(`${this.baseUrl}/messages`, this.body(req, model, false), {
+          headers: this.headers(),
+          signal: req.signal,
+          timeoutMs: this.timeoutMs,
+        });
+      }
+    }
     if (!res.ok || res.data?.error) {
       throw new Error(`Anthropic error: ${res.data?.error?.message ?? `HTTP ${res.status} ${res.text.slice(0, 300)}`}`);
     }
@@ -147,6 +177,27 @@ export class AnthropicProvider implements LlmProvider {
 
   async *stream(req: LlmRequest): AsyncGenerator<LlmStreamChunk, void, unknown> {
     const model = await this.model(req);
+    let yielded = false;
+    try {
+      for await (const chunk of this.streamOnce(req, model)) {
+        yielded = true;
+        yield chunk;
+      }
+      return;
+    } catch (error) {
+      // `streamSse` throws an HttpError whose body carries the provider's message;
+      // testing only `error.message` missed "temperature is deprecated".
+      const message = describeFetchError(error);
+      // Retrying after text has been emitted would duplicate it, so the fallback
+      // is only available before the first token.
+      if (yielded || !this.rejectsTemperature(message) || this.withoutTemperature.has(model)) throw error;
+      log.warn('this model rejects temperature; retrying the stream without it', { provider: this.id, model });
+      this.withoutTemperature.add(model);
+    }
+    yield* this.streamOnce(req, model);
+  }
+
+  private async *streamOnce(req: LlmRequest, model: string): AsyncGenerator<LlmStreamChunk, void, unknown> {
     let usage: { prompt: number; completion: number } | undefined;
     for await (const payload of streamSse(`${this.baseUrl}/messages`, this.body(req, model, true), {
       headers: this.headers(),

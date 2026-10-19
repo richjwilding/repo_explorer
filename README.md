@@ -163,6 +163,15 @@ Reasoning output is recognised for both `reasoning_content` (DeepSeek) and `reas
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+### Models that reject a request parameter
+
+Model APIs change faster than any list of model names survives. If a model
+rejects `temperature` — Claude's current models call it deprecated, and OpenAI's
+reasoning models reject it outright — the app drops the parameter for that model,
+retries, and remembers, so the cost is one round trip the first time and nothing
+after that. Everything the request needs to work is discovered this way rather
+than assumed from a name.
+
 ## Configuration
 
 Any of these can be set as environment variables, or written to `~/.repo-explorer/config.json`:

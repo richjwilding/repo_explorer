@@ -99,6 +99,11 @@ Dependencies now come from four kinds of evidence, in descending order of author
 
 | Failure mode | What went wrong | What prevents it |
 | --- | --- | --- |
+| A model parameter removed by the provider | Newer Claude models answer "temperature is deprecated for this model", and OpenAI's reasoning models reject it too, so every explainer failed against a current model | The first rejection drops the parameter for that model and remembers it; models that still accept it keep the value the prompts are written for |
+| A retry that would duplicate output | A stream that has already emitted text cannot be re-sent without repeating it | The stream fallback is available only before the first token, and is skipped once anything has been emitted |
+| An error message hiding the provider's own words | `streamSse` throws an `HttpError` whose `body` carries the provider's message, so matching on `error.message` alone saw only "HTTP 400" and missed the reason | Provider error text is read through `describeFetchError`, which includes the body |
+
+| --- | --- | --- |
 | Two save buttons that saved different things | "Save and test" omitted the API key from its request, so typing a key and pressing the button labelled *test* saved the provider without the credential and then reported that it could not be used | One button, and the payload is built by one function that tests cover |
 | A provider that does not exist until it is configured | Anthropic was only registered when a key was already present at startup, so choosing it before saving a key produced "Unknown LLM provider" — which says the opposite of the truth | Every provider is registered unconditionally; its own status reports "No API key set", which is the actual situation |
 

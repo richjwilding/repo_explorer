@@ -135,12 +135,23 @@ export class OpenAiProvider implements LlmProvider {
     return status.defaultModel ?? 'gpt-4o-mini';
   }
 
+  /**
+   * Models that reject `temperature` — OpenAI's reasoning models among them, and
+   * some others reachable through a compatible endpoint. Learned rather than
+   * listed, because a hardcoded list of model names rots.
+   */
+  private readonly withoutTemperature = new Set<string>();
+
+  private rejectsTemperature(message: string): boolean {
+    return /temperature/i.test(message) && /(unsupport|not support|deprecat|removed|invalid|unknown|unrecognized)/i.test(message);
+  }
+
   private body(req: LlmRequest, model: string, stream: boolean): Record<string, unknown> {
     return {
       model,
       messages: req.messages,
       stream,
-      ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+      ...(req.temperature !== undefined && !this.withoutTemperature.has(model) ? { temperature: req.temperature } : {}),
       ...(req.maxTokens !== undefined ? { max_tokens: req.maxTokens } : {}),
       ...(req.json ? { response_format: { type: 'json_object' } } : {}),
       ...(stream ? { stream_options: { include_usage: true } } : {}),
@@ -158,6 +169,17 @@ export class OpenAiProvider implements LlmProvider {
     if (!res.ok && req.json && /response_format|json_object/i.test(res.text)) {
       const relaxed: LlmRequest = { ...req, json: false };
       res = await postJson<OpenAiChatResponse>(`${this.base}/chat/completions`, this.body(relaxed, model, false), {
+        headers: this.headers(),
+        signal: req.signal,
+        timeoutMs: this.timeoutMs,
+      });
+    }
+    // A model that has removed `temperature` should not cost the user an
+    // explanation; drop it and remember the model.
+    if ((!res.ok || res.data?.error) && this.rejectsTemperature(res.data?.error?.message ?? res.text) && !this.withoutTemperature.has(model)) {
+      log.warn('this model rejects temperature; retrying without it', { provider: this.id, model });
+      this.withoutTemperature.add(model);
+      res = await postJson<OpenAiChatResponse>(`${this.base}/chat/completions`, this.body(req, model, false), {
         headers: this.headers(),
         signal: req.signal,
         timeoutMs: this.timeoutMs,
@@ -189,6 +211,25 @@ export class OpenAiProvider implements LlmProvider {
 
   async *stream(req: LlmRequest): AsyncGenerator<LlmStreamChunk, void, unknown> {
     const model = await this.model(req);
+    let emittedAny = false;
+    try {
+      for await (const chunk of this.streamOnce(req, model)) {
+        emittedAny = true;
+        yield chunk;
+      }
+      return;
+    } catch (error) {
+      // The provider's message is in the HttpError body, not its `message`.
+      const message = describeFetchError(error);
+      // Retrying after text has been emitted would duplicate it.
+      if (emittedAny || !this.rejectsTemperature(message) || this.withoutTemperature.has(model)) throw error;
+      log.warn('this model rejects temperature; retrying the stream without it', { provider: this.id, model });
+      this.withoutTemperature.add(model);
+    }
+    yield* this.streamOnce(req, model);
+  }
+
+  private async *streamOnce(req: LlmRequest, model: string): AsyncGenerator<LlmStreamChunk, void, unknown> {
     let usage: { prompt: number; completion: number } | undefined;
     let emitted = 0;
     let reasoningChars = 0;
