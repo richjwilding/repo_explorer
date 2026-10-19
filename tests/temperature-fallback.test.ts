@@ -59,8 +59,8 @@ describe('anthropic', () => {
   const provider = () => new AnthropicProvider('sk-ant-test', 'claude-future', 5000);
 
   it('retries without temperature, then stops sending it for that model', async () => {
-    stubFetch((call) =>
-      call.url.includes('/messages') && calls.length === 1
+    stubFetch(() =>
+      calls.length === 1
         ? json({ error: { message: TEMPERATURE_ERROR } }, 400)
         : json({ model: 'claude-future', content: [{ text: 'the answer' }], usage: { input_tokens: 5, output_tokens: 7 } }),
     );
@@ -77,7 +77,7 @@ describe('anthropic', () => {
     stubFetch(() => json({ model: 'claude-future', content: [{ text: 'ok' }] }));
     const instance = provider();
     // Teach it once.
-    stubFetch((call) => (calls.length === 1 ? json({ error: { message: TEMPERATURE_ERROR } }, 400) : json({ content: [{ text: 'ok' }] })));
+    stubFetch(() => (calls.length === 1 ? json({ error: { message: TEMPERATURE_ERROR } }, 400) : json({ content: [{ text: 'ok' }] })));
     await instance.complete(request());
     const afterLearning = calls.length;
     expect(afterLearning).toBe(2);
@@ -112,7 +112,7 @@ describe('openai-compatible', () => {
   const provider = () => new OpenAiProvider('https://api.example.com/v1', 'sk-test', 'o-reasoner', 5000);
 
   it('retries without temperature for a model that rejects it', async () => {
-    stubFetch((call) =>
+    stubFetch(() =>
       calls.length === 1
         ? json({ error: { message: "Unsupported parameter: 'temperature' is not supported with this model." } }, 400)
         : json({ model: 'o-reasoner', choices: [{ message: { content: 'the answer' }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 4 } }),
@@ -160,7 +160,7 @@ describe('streaming', () => {
   }
 
   it('retries the stream without temperature when nothing has been emitted yet', async () => {
-    stubFetch((call) =>
+    stubFetch(() =>
       calls.length === 1
         ? ({ ok: false, status: 400, text: async () => TEMPERATURE_ERROR, body: null, headers: new Map() } as unknown as Response)
         : sse(['data: {"type":"content_block_delta","delta":{"text":"hello"}}\n\n']),
