@@ -297,7 +297,10 @@ export function describeGenerationFailure(error: unknown): string {
   if (/budget without producing|cancelled/i.test(message)) {
     return 'The agent spent its whole investigation budget without producing a written explanation. That is usually transient — regenerating normally succeeds.';
   }
-  if (/no provider|not configured|no api key|credential|unauthor|401|403/i.test(message)) {
+  // Providers phrase a rejected key in their own words — DeepSeek says
+  // "Authentication Fails, Your api key: ****9G0A is invalid". A real run hit
+  // exactly that and fell through to the raw message.
+  if (/no provider|not configured|no api key|credential|unauthor|401|403|authentication|invalid api key|api key[^.]*invalid|incorrect api key/i.test(message)) {
     return 'No language model is available: no provider is configured, or the credential was rejected. Check the model settings, then regenerate.';
   }
   if (/timed out|timeout|ECONNREFUSED|ENOTFOUND|fetch failed|socket hang up/i.test(message)) {

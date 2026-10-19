@@ -467,6 +467,48 @@ Findings are ordered by how much they usually matter, and every expectation that
 *is* met is listed alongside them, so the report reads as a balance rather than a
 list of complaints.
 
+## Pull requests
+
+A pull request is read from **GitHub's API**, not from your clone. That is a
+deliberate choice on two counts: `git fetch origin pull/N/head` would write refs
+into the repository being analysed, and most PRs you are asked to read were never
+checked out locally.
+
+Give it a number and it fetches the whole PR — title, description, the commit
+list, and every changed file with its patch — then runs the ordinary change
+explainer over it. So a PR explainer gets the same Background, Intuition,
+walkthrough and quiz as a commit, and the same self-contained HTML export.
+
+```
+Changes → Pull request → 25 → Explain this pull request
+```
+
+It uses the `origin` remote of the open repository. An `owner`/`repo` pair can be
+passed to read a PR somewhere else.
+
+**Private repositories need a token.** Add `GITHUB_TOKEN` (or `GH_TOKEN`) to
+`~/.repo-explorer/.env`. Without one GitHub allows 60 requests an hour, which is
+enough for casual use and not much else. The token is used only for these
+requests, is never returned to the browser, and is scrubbed from logs like every
+other credential.
+
+### What a PR failure tells you
+
+Reading a PR can fail in ways that look identical and are not, so each one is
+reported distinctly:
+
+| | |
+| --- | --- |
+| Not found | the number is wrong — **or** the repository is private and you have no token. The message says both, because they are otherwise indistinguishable |
+| Rejected token | `GITHUB_TOKEN` is set but wrong |
+| Rate limited | says when the limit resets, and that a token raises it |
+| No `origin` remote | there is no GitHub repository to ask about; set one, or pass the owner and repository |
+| Unreachable / unreadable | GitHub is down or answered something unexpected |
+
+Only the last two are reported as server errors; a missing remote or a wrong
+number is a 400 or 404, because it is a problem with the request rather than with
+the app.
+
 ## When an explanation cannot be written
 
 If the model cannot produce one, the app says which of several things happened

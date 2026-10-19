@@ -39,10 +39,33 @@ async function getJson<T>(pathname: string): Promise<T> {
   return (await response.json()) as T;
 }
 
+/**
+ * Credentials the developer's shell happens to export.
+ *
+ * A test asserting "no credential is configured" can only mean that if the
+ * environment has none — and `credentialSource` reads `process.env` directly, so
+ * a key exported in a terminal made this fail for reasons that had nothing to do
+ * with the code under test. Cleared here and put back afterwards.
+ */
+const SAVED_ENV: Record<string, string | undefined> = {};
+const CREDENTIAL_ENV_VARS = [
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'REPO_EXPLORER_OPENAI_API_KEY',
+  'REPO_EXPLORER_ANTHROPIC_API_KEY',
+  'REPO_EXPLORER_GITHUB_TOKEN',
+];
+
 beforeAll(async () => {
   process.env.REPO_EXPLORER_LOG = 'silent';
   // Hermetic: never pick up a .env that happens to sit in the project directory.
   process.env.REPO_EXPLORER_DOTENV = '0';
+  for (const name of CREDENTIAL_ENV_VARS) {
+    SAVED_ENV[name] = process.env[name];
+    delete process.env[name];
+  }
   fixture = createFixtureRepo();
   const temp = createTempHome();
   homeDir = temp.home;
@@ -68,6 +91,10 @@ beforeAll(async () => {
 }, 90_000);
 
 afterAll(async () => {
+  for (const [name, value] of Object.entries(SAVED_ENV)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
   await server?.close();
   fixture?.cleanup();
   cleanupHome?.();

@@ -99,6 +99,12 @@ Dependencies now come from four kinds of evidence, in descending order of author
 
 | Failure mode | What went wrong | What prevents it |
 | --- | --- | --- |
+| Fetching a PR by writing into the analysed repository | `git fetch origin pull/N/head` adds refs to `.git`, which breaks the promise that nothing is written into the repository being read | Pull requests are read from GitHub's API, and a test asserts the clone gains no refs |
+| A rejected key reported as the raw provider message | DeepSeek says "Authentication Fails, Your api key: ****9G0A is invalid"; the classifier did not match that wording and passed it through | The classification covers the words providers actually use, with a case quoted from the real response |
+| A configuration problem reported as a server fault | A repository with no `origin` remote returned 500 | Failure kinds map to statuses: no-remote 400, not-found 404, auth 401, rate-limit 429, upstream 502 |
+| A test that depends on the developer's shell | A test asserting "no credential is configured" failed whenever the terminal exported `OPENAI_API_KEY`, which had nothing to do with the code | The credential environment variables are cleared for the test and restored afterwards |
+
+| --- | --- | --- |
 | Giving up instead of writing up | Three unparseable model replies, or three replies that named no tool, threw from inside the investigation loop — which skipped the write path entirely, so a run that had already read everything it needed ended as a static outline | Every early bail-out leaves the loop and hands over to the compact write; only the write itself failing is fatal |
 | Retrying on the context that caused the failure | The recovery attempt replayed the whole transcript: tens of thousands of characters of diff plus every observation | The recovery sends the seed and a short note of what was verified, then a second attempt with the seed alone |
 | A terse retry that contradicted the required structure | The recovery asked for "4-6 sections" while the change scope requires eight, so it produced answers that met the request and skipped the structure | The retry names no count and requires every section the scope lists |

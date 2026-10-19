@@ -38,6 +38,19 @@ function parseSpec(body: Record<string, unknown>): ChangeSpec {
     if (!body.branch) throw Object.assign(new Error('kind=branch requires "branch"'), { statusCode: 400 });
     return { kind: 'branch', branch: String(body.branch), base: body.base ? String(body.base) : undefined };
   }
+  if (kind === 'pr') {
+    const number = Number.parseInt(String(body.number ?? ''), 10);
+    if (!Number.isInteger(number) || number <= 0) {
+      throw Object.assign(new Error('kind=pr requires a positive integer "number"'), { statusCode: 400 });
+    }
+    return {
+      kind: 'pr',
+      number,
+      // Optional, so a pull request in another repository can be explained.
+      owner: body.owner ? String(body.owner) : undefined,
+      repo: body.repo ? String(body.repo) : undefined,
+    };
+  }
   throw Object.assign(new Error(`Unknown change kind: ${kind}`), { statusCode: 400 });
 }
 

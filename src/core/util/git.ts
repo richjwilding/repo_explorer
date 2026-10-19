@@ -439,6 +439,7 @@ export type ChangeSpec =
   | { kind: 'commit'; sha: string }
   | { kind: 'range'; base: string; head: string; label?: string }
   | { kind: 'branch'; branch: string; base?: string }
+  | { kind: 'pr'; number: number; owner?: string; repo?: string }
   | { kind: 'working' };
 
 export async function buildChange(root: string, spec: ChangeSpec): Promise<Change> {
@@ -502,6 +503,12 @@ export async function buildChange(root: string, spec: ChangeSpec): Promise<Chang
       stats: aggregateStats(files),
       body: '',
     };
+  }
+
+  // A pull request is built from the GitHub API, not from the clone, because
+  // fetching `pull/N/head` would write refs into the repository being analysed.
+  if (spec.kind === 'pr') {
+    throw new Error('Pull request changes are built from GitHub, not from the local clone.');
   }
 
   // range

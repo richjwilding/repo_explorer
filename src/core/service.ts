@@ -9,6 +9,7 @@ import { resolveProvider } from './llm/registry.js';
 import type { LlmProvider } from './types.js';
 import { log } from './logger.js';
 import { buildChange, gitSummary, makeRepoRef, type ChangeSpec } from './util/git.js';
+import { buildPullRequestChange } from './util/github.js';
 import { repoId } from './util/id.js';
 
 export interface RepoContext {
@@ -137,7 +138,7 @@ export class RepoService {
     secretsStored: Record<string, string>;
     secretStorage: { file: string; source: 'env' | 'dotenv' | 'config' | 'none' };
   }> {
-    const allowed = ['provider', 'model', 'openaiBaseUrl', 'openaiApiKey', 'anthropicApiKey', 'ollamaUrl', 'ollamaNumCtx'];
+    const allowed = ['provider', 'model', 'openaiBaseUrl', 'openaiApiKey', 'anthropicApiKey', 'githubToken', 'ollamaUrl', 'ollamaNumCtx'];
     const clean: Record<string, unknown> = {};
     for (const key of allowed) {
       if (!(key in patch)) continue;
@@ -146,7 +147,7 @@ export class RepoService {
       clean[key] = key === 'ollamaNumCtx' ? Number(value) || undefined : value === null ? '' : String(value).trim();
     }
     const secrets: Partial<Record<SecretName, string>> = {};
-    for (const field of ['openaiApiKey', 'anthropicApiKey'] as const) {
+    for (const field of ['openaiApiKey', 'anthropicApiKey', 'githubToken'] as const) {
       if (field in clean) {
         secrets[field] = String(clean[field] ?? '');
         delete clean[field];
@@ -197,10 +198,12 @@ export class RepoService {
     return stored;
   }
   /** The provider actually in use right now, after resolution and fallback. */
-  credentialStates(): { openai: string; anthropic: string } {
+  credentialStates(): { openai: string; anthropic: string; github: string } {
     return {
       openai: credentialSource(this.cfg, 'openaiApiKey'),
       anthropic: credentialSource(this.cfg, 'anthropicApiKey'),
+      // Only ever the *source* of the credential, never its value.
+      github: credentialSource(this.cfg, 'githubToken'),
     };
   }
 
@@ -339,7 +342,10 @@ export class RepoService {
       const cached = await this.store.readChange(ctx.model.repo.id, changeId);
       if (cached) return cached;
     }
-    const change = await buildChange(ctx.root, spec);
+    const change =
+      spec.kind === 'pr'
+        ? await buildPullRequestChange(ctx.root, { number: spec.number, owner: spec.owner, repo: spec.repo }, { token: this.cfg.githubToken })
+        : await buildChange(ctx.root, spec);
     await this.store.writeChange(ctx.model.repo.id, change);
     return change;
   }
@@ -353,7 +359,7 @@ export class RepoService {
   }
 }
 
-type SecretName = 'openaiApiKey' | 'anthropicApiKey';
+type SecretName = 'openaiApiKey' | 'anthropicApiKey' | 'githubToken';
 
 function repoIdOf(dir: string): string {
   return repoId(path.resolve(dir));
@@ -367,6 +373,8 @@ export function changeSpecId(spec: ChangeSpec): string {
       return `range-${spec.base}-${spec.head}`;
     case 'branch':
       return `branch-${spec.branch}-${spec.base ?? 'default'}`;
+    case 'pr':
+      return `pr-${spec.owner ?? 'origin'}-${spec.repo ?? ''}-${spec.number}`.replace(/[^A-Za-z0-9._-]/g, '-');
     case 'working':
       return 'working-tree';
   }

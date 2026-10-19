@@ -30,7 +30,8 @@ export interface ChangesViewProps {
 type HistoryReason = 'ok' | 'not-a-repo' | 'no-commits' | 'unreadable';
 
 export function ChangesView({ repoId, onOpenFile }: ChangesViewProps) {
-  const [tab, setTab] = useState<'commits' | 'branches' | 'working'>('commits');
+  const [tab, setTab] = useState<'commits' | 'branches' | 'pr' | 'working'>('commits');
+  const [prNumber, setPrNumber] = useState('');
   const [commits, setCommits] = useState<CommitInfo[]>([]);
   const [branches, setBranches] = useState<BranchInfo[]>([]);
   const [reason, setReason] = useState<HistoryReason>('ok');
@@ -121,6 +122,9 @@ export function ChangesView({ repoId, onOpenFile }: ChangesViewProps) {
           <button type="button" className={tab === 'branches' ? 'active' : ''} onClick={() => setTab('branches')}>
             Branches
           </button>
+          <button type="button" className={tab === 'pr' ? 'active' : ''} onClick={() => setTab('pr')}>
+            Pull request
+          </button>
           <button type="button" className={tab === 'working' ? 'active' : ''} onClick={() => setTab('working')}>
             Working tree
           </button>
@@ -140,6 +144,41 @@ export function ChangesView({ repoId, onOpenFile }: ChangesViewProps) {
             ))}
             {commits.length === 0 ? <li className="muted pad">{emptyListMessage(reason)}</li> : null}
           </ul>
+        ) : null}
+
+        {tab === 'pr' ? (
+          <form
+            className="branch-panel"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const number = Number.parseInt(prNumber, 10);
+              if (!Number.isInteger(number) || number <= 0) return;
+              loadChange({ kind: 'pr', number });
+            }}
+          >
+            <p className="caption">
+              Read a pull request from GitHub — the whole PR, not just its commits, with its description as background. Nothing is
+              fetched into your clone.
+            </p>
+            <label className="field">
+              <span>Pull request number</span>
+              <input
+                type="number"
+                min={1}
+                value={prNumber}
+                onChange={(event) => setPrNumber(event.target.value)}
+                placeholder="e.g. 542"
+                disabled={busy}
+              />
+            </label>
+            <button type="submit" className="button" disabled={busy || !prNumber.trim()}>
+              Explain this pull request
+            </button>
+            <p className="caption muted">
+              Uses the <code>origin</code> remote. Private repositories need <code>GITHUB_TOKEN</code> in your <code>.env</code>; without
+              one GitHub allows 60 requests an hour.
+            </p>
+          </form>
         ) : null}
 
         {tab === 'branches' ? (

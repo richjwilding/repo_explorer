@@ -20,6 +20,11 @@ export interface AppConfig {
   openaiBaseUrl: string;
   openaiApiKey: string | null;
   anthropicApiKey: string | null;
+  /**
+   * Optional. Without it pull requests are read from the public API, which is
+   * limited to 60 requests an hour and cannot see private repositories.
+   */
+  githubToken: string | null;
   bedrockRegion: string | null;
   /** Where exported explainer HTML files are written. */
   exportDir: string;
@@ -31,7 +36,7 @@ export interface AppConfig {
   maxContextChars: number;
 
   /** Filled in by resolveSecrets(); never written to disk. */
-  credentialSources: Partial<Record<'openaiApiKey' | 'anthropicApiKey', CredentialSource>>;
+  credentialSources: Partial<Record<CredentialField, CredentialSource>>;
   /** Directory searched for a `.env` before the app config directory. */
   cwd: string;
   llmTimeoutMs: number;
@@ -45,10 +50,21 @@ function envInt(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+export type CredentialField = 'openaiApiKey' | 'anthropicApiKey' | 'githubToken';
+
 /** The conventional environment variable name for each credential. */
-export const CREDENTIAL_ENV_NAMES: Record<'openaiApiKey' | 'anthropicApiKey', string> = {
+export const CREDENTIAL_ENV_NAMES: Record<CredentialField, string> = {
   openaiApiKey: 'OPENAI_API_KEY',
   anthropicApiKey: 'ANTHROPIC_API_KEY',
+  // Both spellings are in wide use; GH_TOKEN is what `gh` sets.
+  githubToken: 'GITHUB_TOKEN',
+};
+
+/** Environment names checked for each credential, in order. */
+const CREDENTIAL_ENV_ALIASES: Record<CredentialField, string[]> = {
+  openaiApiKey: ['OPENAI_API_KEY'],
+  anthropicApiKey: ['ANTHROPIC_API_KEY'],
+  githubToken: ['GITHUB_TOKEN', 'GH_TOKEN'],
 };
 
 export function configFilePath(home: string): string {
@@ -97,15 +113,15 @@ export function envKeyFor(key: string): string {
  * Where a credential came from: a real environment variable, a `.env` file, the
  * legacy config file, or nowhere. Never the secret itself.
  */
-export function credentialSource(cfg: AppConfig, field: 'openaiApiKey' | 'anthropicApiKey'): CredentialSource {
-  const conventionalKey = field === 'openaiApiKey' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+export function credentialSource(cfg: AppConfig, field: CredentialField): CredentialSource {
+  const alias = CREDENTIAL_ENV_ALIASES[field].find((name) => process.env[name]);
   const dedicated = process.env[envKeyFor(field)];
-  const conventional = process.env[conventionalKey];
+  const conventional = alias ? process.env[alias] : undefined;
   if (dedicated || conventional) {
     // It may only be in the environment because we loaded a `.env` file. Report
     // that rather than claiming the shell set it — but only when the file
     // actually supplied the value in use.
-    return wasInjectedByDotEnv(envKeyFor(field)) || wasInjectedByDotEnv(conventionalKey) ? 'dotenv' : 'env';
+    return wasInjectedByDotEnv(envKeyFor(field)) || (alias ? wasInjectedByDotEnv(alias) : false) ? 'dotenv' : 'env';
   }
   const resolved = cfg.credentialSources[field];
   if (resolved) return resolved;
@@ -126,8 +142,8 @@ export async function resolveSecrets(cfg: AppConfig): Promise<AppConfig> {
   const legacy = readConfigFile(cfg.home);
   let migrated = false;
 
-  for (const field of ['openaiApiKey', 'anthropicApiKey'] as const) {
-    const fromEnv = process.env[envKeyFor(field)] ?? (field === 'openaiApiKey' ? process.env.OPENAI_API_KEY : process.env.ANTHROPIC_API_KEY);
+  for (const field of ['openaiApiKey', 'anthropicApiKey', 'githubToken'] as const) {
+    const fromEnv = process.env[envKeyFor(field)] ?? CREDENTIAL_ENV_ALIASES[field].map((name) => process.env[name]).find(Boolean);
     if (fromEnv) {
       cfg[field] = fromEnv;
       cfg.credentialSources[field] = 'dotenv';
@@ -172,12 +188,12 @@ export async function resolveSecrets(cfg: AppConfig): Promise<AppConfig> {
  */
 export function saveCredentials(
   home: string,
-  secrets: Partial<Record<'openaiApiKey' | 'anthropicApiKey', string>>,
+  secrets: Partial<Record<CredentialField, string>>,
 ): { path: string; stored: Record<string, string> } {
   const stored: Record<string, string> = {};
   let file = path.join(home, '.env');
 
-  for (const [field, raw] of Object.entries(secrets) as ['openaiApiKey' | 'anthropicApiKey', string][]) {
+  for (const [field, raw] of Object.entries(secrets) as [CredentialField, string][]) {
     const value = String(raw ?? '').trim();
     const result = writeDotEnvValue(home, CREDENTIAL_ENV_NAMES[field], value || null);
     file = result.path;
@@ -194,13 +210,14 @@ export function saveCredentials(
 
 /** Settings keys whose value is currently being forced by an environment variable. */
 export function shadowedSettings(): string[] {
-  const keys = ['provider', 'model', 'openaiBaseUrl', 'openaiApiKey', 'anthropicApiKey', 'ollamaUrl', 'ollamaNumCtx'];
+  const keys = ['provider', 'model', 'openaiBaseUrl', 'openaiApiKey', 'anthropicApiKey', 'githubToken', 'ollamaUrl', 'ollamaNumCtx'];
   const shadowed = keys.filter((key) => {
     const value = process.env[envKeyFor(key)];
     return value !== undefined && value !== '';
   });
   if (process.env.OPENAI_API_KEY) shadowed.push('openaiApiKey');
   if (process.env.ANTHROPIC_API_KEY) shadowed.push('anthropicApiKey');
+  if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) shadowed.push('githubToken');
   return [...new Set(shadowed)];
 }
 
@@ -246,6 +263,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     openaiBaseUrl: pick('openaiBaseUrl', process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1'),
     openaiApiKey: pick<string | null>('openaiApiKey', process.env.OPENAI_API_KEY || null),
     anthropicApiKey: pick<string | null>('anthropicApiKey', process.env.ANTHROPIC_API_KEY || null),
+    githubToken: pick<string | null>('githubToken', process.env.GITHUB_TOKEN || process.env.GH_TOKEN || null),
     bedrockRegion: pick<string | null>('bedrockRegion', process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || null),
     exportDir: pick('exportDir', process.env.REPO_EXPLORER_EXPORT_DIR || path.join(os.homedir(), 'RepoExplorer')),
     maxFiles: envInt('REPO_EXPLORER_MAX_FILES', 20000),

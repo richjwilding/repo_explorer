@@ -92,6 +92,15 @@ describe('explaining why a written explanation is missing', () => {
     expect(describeGenerationFailure(new Error('401 Unauthorized'))).toContain('No language model is available');
   });
 
+  it("recognises the wording a provider actually uses for a rejected key", () => {
+    // Quoted from a real DeepSeek response, which fell through to the raw message.
+    const reason = describeGenerationFailure(
+      new Error('LLM error: Authentication Fails, Your api key: ****9G0A is invalid (request_id: 8917)'),
+    );
+    expect(reason).toContain('No language model is available');
+    expect(reason).toContain('Check the model settings');
+  });
+
   it('identifies an unreachable provider', () => {
     expect(describeGenerationFailure(new Error('fetch failed'))).toContain('could not be reached');
     expect(describeGenerationFailure(new Error('request timed out'))).toContain('could not be reached');
