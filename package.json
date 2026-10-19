@@ -15,6 +15,7 @@
     "dev:server": "tsx watch src/server/index.ts",
     "dev:web": "vite",
     "build": "vite build && tsc -p tsconfig.server.json",
+    "prestart": "node bin/ensure-build.mjs",
     "start": "node dist/server/server/index.js",
     "serve": "tsx src/server/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",

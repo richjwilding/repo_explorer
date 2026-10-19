@@ -8,31 +8,23 @@
  * Uses the compiled server when it exists, and falls back to running the
  * TypeScript sources through tsx so a fresh checkout works immediately.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { ensureBuild, projectRoot } from './ensure-build.mjs';
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const projectRoot = path.resolve(here, '..');
 const compiledServer = path.join(projectRoot, 'dist', 'server', 'server', 'index.js');
 const sourceServer = path.join(projectRoot, 'src', 'server', 'index.ts');
-const webBuild = path.join(projectRoot, 'dist', 'web', 'index.html');
 
 const args = process.argv.slice(2);
 const wantsBuild = args.includes('--build');
 const passthrough = args.filter((arg) => arg !== '--build');
 
-if (wantsBuild) {
-  console.log('Building the UI…');
-  const build = spawnSync('npm', ['run', 'build'], { cwd: projectRoot, stdio: 'inherit' });
-  if (build.status !== 0) process.exit(build.status ?? 1);
-} else if (!existsSync(webBuild)) {
-  console.log('No UI build found. Building it once (this takes a few seconds)…');
-  const build = spawnSync('npm', ['run', 'build'], { cwd: projectRoot, stdio: 'inherit' });
-  if (build.status !== 0) {
-    console.warn('Build failed; starting the API only. Run `npm run dev` for the live UI.');
-  }
+// `npm start` uses the same helper, so "is there a build" has one definition
+// rather than two that can disagree.
+if (wantsBuild || !ensureBuild({ quiet: !wantsBuild })) {
+  // A failed build is not fatal here: the server can still run from source.
+  if (wantsBuild && !ensureBuild()) process.exit(1);
 }
 
 const useCompiled = existsSync(compiledServer);

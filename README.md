@@ -60,8 +60,17 @@ Every step is streamed to the UI, so you watch the investigation happen. The pro
 
 ```bash
 npm install
-npm run build          # builds the UI and the server
 npm start -- /path/to/repository
+```
+
+`npm start` builds the first time, and rebuilds whenever the sources are newer
+than the build. A clean build takes a few seconds. `dist/` is not committed, so
+there is nothing to download ready-made.
+
+To build explicitly — for a deploy, or to see build errors on their own:
+
+```bash
+npm run build
 ```
 
 Or use the launcher, which builds on first run and opens your browser:
