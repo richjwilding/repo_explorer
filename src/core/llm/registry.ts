@@ -9,11 +9,13 @@ import { OpenAiProvider } from './openai.js';
 export function buildProviders(cfg: AppConfig): LlmProvider[] {
   const providers: LlmProvider[] = [];
 
-  if (cfg.anthropicApiKey) {
-    providers.push(
-      new AnthropicProvider(cfg.anthropicApiKey, cfg.model, cfg.llmTimeoutMs, undefined, credentialSource(cfg, 'anthropicApiKey')),
-    );
-  }
+  // Registered whether or not a key is present, like every other provider. It
+  // used to be conditional, so choosing Anthropic before a key existed produced
+  // "Unknown LLM provider" — which says the opposite of the truth. Its own status
+  // now reports "No API key set", which is the actual situation.
+  providers.push(
+    new AnthropicProvider(cfg.anthropicApiKey ?? '', cfg.model, cfg.llmTimeoutMs, undefined, credentialSource(cfg, 'anthropicApiKey')),
+  );
   providers.push(
     new OpenAiProvider(cfg.openaiBaseUrl, cfg.openaiApiKey, cfg.model, cfg.llmTimeoutMs, {
       id: 'openai',

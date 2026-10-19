@@ -1,3 +1,4 @@
+import { buildProviderPatch } from '../lib/providerPatch';
 import { useCallback, useEffect, useState } from 'react';
 import type { ProviderStatus } from '../../core/types';
 import { api } from '../lib/api';
@@ -322,29 +323,16 @@ export function ModelsPanel({ providers, providerId, onClose, onApplied }: Model
         <footer className="modal-foot">
           <span className="muted small">Saved to {configPath || '~/.repo-explorer/config.json'}</span>
           <div className="modal-actions">
-            <button
-              type="button"
-              className="ghost-button"
-              onClick={() => void save({ provider: preset, ...(preset === 'openai' ? { openaiBaseUrl: baseUrl } : {}), ...(preset === 'ollama' ? { ollamaUrl } : {}) })}
-              disabled={busy}
-            >
-              Save and test
-            </button>
+            {/* One button. There used to be two, and the one labelled "Save and
+                test" omitted the API key, so entering a key and pressing it saved
+                the provider without the credential. */}
             <button
               type="button"
               className="primary-button"
               disabled={busy}
-              onClick={() =>
-                void save({
-                  provider: preset,
-                  model: model || '',
-                  ...(preset === 'openai' ? { openaiBaseUrl: baseUrl, ...(apiKey ? { openaiApiKey: apiKey } : {}) } : {}),
-                  ...(preset === 'anthropic' ? (anthropicKey ? { anthropicApiKey: anthropicKey } : {}) : {}),
-                  ...(preset === 'ollama' ? { ollamaUrl } : {}),
-                })
-              }
+              onClick={() => void save(buildProviderPatch({ preset, apiKey, anthropicKey, openaiBaseUrl: baseUrl, ollamaUrl, model }))}
             >
-              {busy ? 'Working…' : 'Save and switch'}
+              {busy ? 'Working…' : 'Save and test'}
             </button>
           </div>
         </footer>

@@ -225,7 +225,12 @@ export REPO_EXPLORER_DOTENV=0        # ignore .env entirely
 export REPO_EXPLORER_HOME=~/somewhere # move both files
 ```
 
-**Keys are never returned to the browser.** `/api/providers` and `/api/settings` report only whether a credential
+**Selecting a provider and entering a key is one action: **Save and test** writes
+the key to `.env` and reports whether the provider is now reachable. If it is not,
+the panel says which of the two things is wrong — the key was rejected, or the
+provider was never configured — rather than that it does not know the provider.
+
+Keys are never returned to the browser.** `/api/providers` and `/api/settings` report only whether a credential
 is present and where it came from, and every user-visible string — provider status details, error messages, SSE
 frames and log lines — passes through a redactor that strips both known key values and anything shaped like one
 (`sk-…`, `sk-ant-…`, `Bearer …`, `x-api-key: …`, `AIza…`, `hf_…`). That matters because an upstream 401 body

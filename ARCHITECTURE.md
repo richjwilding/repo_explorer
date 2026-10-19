@@ -99,6 +99,10 @@ Dependencies now come from four kinds of evidence, in descending order of author
 
 | Failure mode | What went wrong | What prevents it |
 | --- | --- | --- |
+| Two save buttons that saved different things | "Save and test" omitted the API key from its request, so typing a key and pressing the button labelled *test* saved the provider without the credential and then reported that it could not be used | One button, and the payload is built by one function that tests cover |
+| A provider that does not exist until it is configured | Anthropic was only registered when a key was already present at startup, so choosing it before saving a key produced "Unknown LLM provider" — which says the opposite of the truth | Every provider is registered unconditionally; its own status reports "No API key set", which is the actual situation |
+
+| --- | --- | --- |
 | Fetching a PR by writing into the analysed repository | `git fetch origin pull/N/head` adds refs to `.git`, which breaks the promise that nothing is written into the repository being read | Pull requests are read from GitHub's API, and a test asserts the clone gains no refs |
 | A rejected key reported as the raw provider message | DeepSeek says "Authentication Fails, Your api key: ****9G0A is invalid"; the classifier did not match that wording and passed it through | The classification covers the words providers actually use, with a case quoted from the real response |
 | A configuration problem reported as a server fault | A repository with no `origin` remote returned 500 | Failure kinds map to statuses: no-remote 400, not-found 404, auth 401, rate-limit 429, upstream 502 |
