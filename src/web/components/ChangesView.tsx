@@ -29,6 +29,14 @@ export interface ChangesViewProps {
 
 type HistoryReason = 'ok' | 'not-a-repo' | 'no-commits' | 'unreadable';
 
+/**
+ * How a branch should be read. Default is the branch's own work, because that is
+ * what "what is this branch about" normally means; the tip-to-tip comparison is
+ * there for when the branch has already been merged and the merge-base diff is
+ * empty.
+ */
+type BranchCompare = 'since-diverged' | 'against-tip';
+
 export function ChangesView({ repoId, onOpenFile }: ChangesViewProps) {
   const [tab, setTab] = useState<'commits' | 'branches' | 'pr' | 'working'>('commits');
   const [prNumber, setPrNumber] = useState('');
@@ -37,6 +45,7 @@ export function ChangesView({ repoId, onOpenFile }: ChangesViewProps) {
   const [reason, setReason] = useState<HistoryReason>('ok');
   const [detail, setDetail] = useState<string | null>(null);
   const [base, setBase] = useState<string>('');
+  const [compare, setCompare] = useState<BranchCompare>('since-diverged');
   const [change, setChange] = useState<Change | null>(null);
   const [explainer, setExplainer] = useState<Explainer | null>(null);
   const [steps, setSteps] = useState<AgentStepView[]>([]);
@@ -45,6 +54,8 @@ export function ChangesView({ repoId, onOpenFile }: ChangesViewProps) {
   const [error, setError] = useState<string | null>(null);
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const stream = useRef<{ cancel(): void } | null>(null);
+  /** The spec behind what is on screen, so "regenerate" re-runs the same request. */
+  const lastSpec = useRef<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     void api
@@ -69,6 +80,7 @@ export function ChangesView({ repoId, onOpenFile }: ChangesViewProps) {
   const loadChange = useCallback(
     (spec: Record<string, unknown>) => {
       stream.current?.cancel();
+      lastSpec.current = spec;
       setBusy(true);
       setError(null);
       setSteps([]);
@@ -80,6 +92,10 @@ export function ChangesView({ repoId, onOpenFile }: ChangesViewProps) {
         if (event.type === 'change') {
           const incoming = event.change as Change;
           setChange(incoming);
+          // The server may widen the comparison (a branch that is already merged
+          // has nothing of its own to show), so the selector follows what was
+          // actually compared rather than what was asked for.
+          if (incoming.kind === 'branch' && incoming.compare) setCompare(incoming.compare.mode);
           setActiveFile(incoming.files[0]?.path ?? null);
         } else if (event.type === 'status') {
           setStatus(String(event.message ?? ''));
@@ -194,19 +210,42 @@ export function ChangesView({ repoId, onOpenFile }: ChangesViewProps) {
                 ))}
               </select>
             </label>
+            <label className="field">
+              <span>What to compare</span>
+              <select value={compare} onChange={(event) => setCompare(event.target.value as BranchCompare)}>
+                <option value="since-diverged">This branch&apos;s own commits</option>
+                <option value="against-tip">Both branch tips, as they are now</option>
+              </select>
+            </label>
+            <p className="caption">
+              {compare === 'since-diverged'
+                ? 'Only the commits this branch added after it left the comparison branch — the usual way to see what a branch is about.'
+                : 'The two tips side by side. Also shows what the comparison branch gained since they diverged, which appears as reversals — but it still works once the branch has been merged.'}
+            </p>
             <ul className="change-list">
               {branches
-                .filter((branch) => !branch.current)
+                // Comparing a branch with itself says nothing.
+                .filter((branch) => branch.name !== base)
                 .map((branch) => (
                   <li key={branch.name}>
-                    <button type="button" onClick={() => loadChange({ kind: 'branch', branch: branch.name, base: base || undefined })} disabled={busy}>
-                      <span className="change-subject">{branch.name}</span>
+                    <button
+                      type="button"
+                      onClick={() => loadChange({ kind: 'branch', branch: branch.name, base: base || undefined, compare })}
+                      disabled={busy}
+                    >
+                      <span className="change-subject">
+                        {branch.name}
+                        {branch.current ? <span className="chip"> checked out</span> : null}
+                      </span>
                       <span className="change-meta">
                         <code>{branch.lastCommit}</code> {relativeTime(branch.date)} · {branch.subject.slice(0, 60)}
                       </span>
                     </button>
                   </li>
                 ))}
+              {branches.filter((branch) => branch.name !== base).length === 0 ? (
+                <li className="muted pad">No other branches to compare with{base ? ` ${base}` : ''}.</li>
+              ) : null}
             </ul>
           </div>
         ) : null}
@@ -241,6 +280,7 @@ export function ChangesView({ repoId, onOpenFile }: ChangesViewProps) {
             <h2>{change.title}</h2>
             <p className="meta">
               <span className="chip">{change.kind}</span>
+              {change.subtitle ? <span className="muted">{change.subtitle}</span> : null}
               <span className="muted">
                 {formatNumber(change.stats.files)} files · <span className="add">+{change.stats.additions}</span>{' '}
                 <span className="del">-{change.stats.deletions}</span>
@@ -250,6 +290,23 @@ export function ChangesView({ repoId, onOpenFile }: ChangesViewProps) {
           </div>
         ) : null}
 
+        {change && change.files.length === 0 ? (
+          <EmptyComparison
+            change={change}
+            busy={busy}
+            onCompare={() => {
+              const spec = lastSpec.current ?? {};
+              if (change.kind !== 'branch' || !spec.branch) return;
+              loadChange({
+                kind: 'branch',
+                branch: String(spec.branch),
+                base: base || change.compare?.baseRef || undefined,
+                compare: 'against-tip',
+              });
+            }}
+          />
+        ) : null}
+
         {explainer ? (
           <ExplainerView
             explainer={explainer}
@@ -257,7 +314,10 @@ export function ChangesView({ repoId, onOpenFile }: ChangesViewProps) {
             steps={steps}
             status={status}
             onDrill={() => undefined}
-            onRegenerate={() => loadChange({ kind: change?.kind === 'working' ? 'working' : 'commit', sha: change?.commits[0]?.sha, refresh: true })}
+            onRegenerate={() => {
+              const spec = lastSpec.current;
+              if (spec) loadChange({ ...spec, refresh: true });
+            }}
             onExport={() => exportExplainer(repoId, 'change', explainer.target.id, setStatus, () => setStatus(null))}
             onOpenFile={onOpenFile}
           />
@@ -290,6 +350,44 @@ export function ChangesView({ repoId, onOpenFile }: ChangesViewProps) {
           </section>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+/**
+ * A comparison that came back empty.
+ *
+ * The explainer already says why, but the reader is standing in front of a diff
+ * tab with nothing in it, so the reason and the way out belong here too.
+ */
+function EmptyComparison({ change, busy, onCompare }: { change: Change; busy: boolean; onCompare: () => void }) {
+  const compare = change.compare;
+  const baseRef = compare?.baseRef ?? change.base;
+  const sameTip = change.subtitle?.startsWith('Same commit') ?? false;
+  const tipToTip = compare?.mode === 'against-tip';
+  const canSwitchTips = change.kind === 'branch' && !tipToTip;
+
+  return (
+    <div className="notice-warn">
+      <strong>
+        {sameTip ? `${change.head} and ${baseRef} are the same commit` : `Nothing differs between ${change.head} and ${baseRef}`}
+      </strong>
+      <p>
+        {sameTip
+          ? 'There is nothing to compare: both names point at the same commit.'
+          : tipToTip
+            ? `The two branch tips are identical, so this comparison has no files in it.`
+            : `${change.head} has no commits of its own that ${baseRef} does not already contain — it is probably already merged.`}
+      </p>
+      {compare?.note ? <p className="muted">{compare.note}</p> : null}
+      {canSwitchTips ? (
+        <p>
+          <button type="button" className="ghost-button attention" onClick={onCompare} disabled={busy}>
+            Compare the two branch tips instead
+          </button>{' '}
+          <span className="muted">Shows everything that differs right now, including what {baseRef} gained after this branch left it.</span>
+        </p>
+      ) : null}
     </div>
   );
 }

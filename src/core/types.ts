@@ -656,6 +656,14 @@ export interface Change {
   kind: 'commit' | 'range' | 'branch' | 'pr' | 'working';
   title: string;
   subtitle?: string;
+  /**
+   * How a comparison was made, when the change is a comparison rather than a
+   * single commit. Recorded because the two readings of "this branch" — its own
+   * commits since it diverged, or how its tip differs from the base tip — answer
+   * different questions, and an empty diff only makes sense next to the one that
+   * was actually performed.
+   */
+  compare?: ChangeComparison;
   /** Commit sha(s) involved, oldest-first. */
   commits: { sha: string; short: string; author: string; email: string; date: string; subject: string; body: string }[];
   base: string;
@@ -775,6 +783,14 @@ export interface FileNode {
   language?: string;
   category?: string;
   childCount?: number;
+}
+
+export interface ChangeComparison {
+  mode: 'since-diverged' | 'against-tip';
+  /** The ref the branch was compared against, as the reader named it. */
+  baseRef: string;
+  /** Why the mode is what it is, when it was not simply the reader's choice. */
+  note?: string;
 }
 
 export interface ChangeSummary {

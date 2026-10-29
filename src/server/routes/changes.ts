@@ -23,6 +23,16 @@ function trimChange(change: Change, maxTotalPatchChars = 3_000_000): Change {
   return { ...change, files };
 }
 
+function assertRef(value: string, field: string): string {
+  const ref = value.trim();
+  // These end up as arguments to git, so a leading dash would be read as an
+  // option. Reject rather than trying to escape.
+  if (!ref || ref.startsWith('-')) {
+    throw Object.assign(new Error(`${field} must be a branch or revision name`), { statusCode: 400 });
+  }
+  return ref;
+}
+
 function parseSpec(body: Record<string, unknown>): ChangeSpec {
   const kind = String(body.kind ?? 'commit');
   if (kind === 'working') return { kind: 'working' };
@@ -36,7 +46,13 @@ function parseSpec(body: Record<string, unknown>): ChangeSpec {
   }
   if (kind === 'branch') {
     if (!body.branch) throw Object.assign(new Error('kind=branch requires "branch"'), { statusCode: 400 });
-    return { kind: 'branch', branch: String(body.branch), base: body.base ? String(body.base) : undefined };
+    const branch = assertRef(String(body.branch), 'branch');
+    const base = body.base ? assertRef(String(body.base), 'base') : undefined;
+    const compare = body.compare === undefined ? undefined : String(body.compare);
+    if (compare !== undefined && compare !== 'since-diverged' && compare !== 'against-tip') {
+      throw Object.assign(new Error('compare must be "since-diverged" or "against-tip"'), { statusCode: 400 });
+    }
+    return { kind: 'branch', branch, base, compare };
   }
   if (kind === 'pr') {
     const number = Number.parseInt(String(body.number ?? ''), 10);

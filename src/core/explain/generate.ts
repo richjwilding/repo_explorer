@@ -6,6 +6,7 @@ import { changeSeed } from '../chat/prompts.js';
 import { explore, type AgentStep, type AgentTask } from '../agent/explorer.js';
 import {
   buildStaticQuiz,
+  emptyChangeExplainer,
   structuralChangeExplainer,
   structuralComponentExplainer,
   structuralFlowExplainer,
@@ -186,6 +187,14 @@ export async function flowExplainer(ctx: RepoContext, flowId: string, options: E
 
 export async function changeExplainer(ctx: RepoContext, change: Change, options: ExplainerOptions = {}): Promise<Explainer> {
   const target: ExplainerTarget = { kind: 'change', id: change.id, label: change.title, level: 0 };
+  // Nothing changed on either side of the comparison. Sending that to the agent
+  // produces a confident, expensive paragraph about an empty diff; what the reader
+  // actually needs is to know which comparison came back empty and why.
+  if (change.files.length === 0) {
+    const empty = emptyChangeExplainer(change);
+    await ctx.store.writeExplainer(ctx.model.repo.id, empty);
+    return empty;
+  }
   return getOrCreate(
     ctx,
     target,

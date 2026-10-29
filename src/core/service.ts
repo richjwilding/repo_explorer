@@ -335,11 +335,16 @@ export class RepoService {
   /**
    * Build (or fetch from cache) a change: a commit, a range, a branch, or the
    * working tree. Diffs are cached because they are expensive on large repos.
+   *
+   * Only commits are immutable enough to serve from a cache keyed by the request:
+   * a branch gains commits, a range is re-read, the working tree gets edited and a
+   * pull request is updated in place. Handing back the old copy in those cases
+   * shows the reader a diff that no longer exists — and, for a branch, hides the
+   * work that was just pushed.
    */
   async change(ctx: RepoContext, spec: ChangeSpec, options: { refresh?: boolean } = {}): Promise<Change> {
-    const changeId = changeSpecId(spec);
-    if (!options.refresh) {
-      const cached = await this.store.readChange(ctx.model.repo.id, changeId);
+    if (!options.refresh && spec.kind === 'commit') {
+      const cached = await this.store.readChange(ctx.model.repo.id, changeSpecId(spec));
       if (cached) return cached;
     }
     const change =
@@ -372,7 +377,7 @@ export function changeSpecId(spec: ChangeSpec): string {
     case 'range':
       return `range-${spec.base}-${spec.head}`;
     case 'branch':
-      return `branch-${spec.branch}-${spec.base ?? 'default'}`;
+      return `branch-${spec.branch}-${spec.compare ?? 'since-diverged'}-${spec.base ?? 'default'}`;
     case 'pr':
       return `pr-${spec.owner ?? 'origin'}-${spec.repo ?? ''}-${spec.number}`.replace(/[^A-Za-z0-9._-]/g, '-');
     case 'working':

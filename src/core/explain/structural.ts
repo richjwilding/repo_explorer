@@ -476,6 +476,57 @@ export function structuralFlowExplainer(model: RepoModel, flow: DataFlow): Expla
  * Change
  * ------------------------------------------------------------------ */
 
+/**
+ * What to say when a comparison turned up no differences.
+ *
+ * This used to go to the model, which dutifully wrote an explainer saying that
+ * nothing had changed — technically true, and useless. The interesting part is
+ * *which* comparison was empty and what the reader can do about it, which we know
+ * without asking anyone.
+ */
+export function emptyChangeExplainer(change: Change): Explainer {
+  const comparison = change.compare;
+  const baseRef = comparison?.baseRef ?? change.base;
+  const sameTip = comparison?.mode === 'against-tip' && change.subtitle?.startsWith('Same commit');
+
+  const summary = comparison
+    ? comparison.mode === 'since-diverged'
+      ? `${change.head} has no commits since it diverged from ${baseRef}, so the diff between them is empty.`
+      : sameTip
+        ? `${change.head} and ${baseRef} point at the same commit, so there is nothing to compare.`
+        : `Nothing differs between the current tip of ${change.head} and the current tip of ${baseRef}.`
+    : 'This change is empty: no files differ between the two sides of the comparison.';
+
+  const advice = sameTip
+    ? `Pick a different branch to compare against, or switch the comparison to "this branch's own commits" if you meant to look at the history it shares with ${baseRef}.`
+    : comparison?.mode === 'since-diverged'
+      ? `If you were expecting work here, check that the branch name is the one you meant, and that its commits have not already been merged into ${baseRef}. Comparing the two branch tips shows the difference that remains either way.`
+      : `If you were expecting work here, check that the branch name is the one you meant.`;
+
+  return make(
+    'change',
+    { kind: 'change', id: change.id, label: change.title, level: 0 },
+    change.title,
+    change.subtitle ?? 'No differences',
+    summary,
+    [
+      callout('c-empty', 'Nothing to explain', `${summary}\n\n${advice}`, 'edge'),
+      {
+        type: 'table',
+        id: 't-refs',
+        title: 'What was compared',
+        headers: ['Side', 'Ref'],
+        rows: [
+          ['Base', comparison ? `${baseRef} (${comparison.mode === 'since-diverged' ? 'merge base' : 'branch tip'})` : change.base],
+          ['Head', change.head],
+        ],
+      },
+    ],
+    [],
+    [],
+  );
+}
+
 export function structuralChangeExplainer(model: RepoModel, change: Change): Explainer {
   const topDirs = new Map<string, number>();
   for (const file of change.files) {

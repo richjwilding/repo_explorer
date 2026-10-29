@@ -379,6 +379,59 @@ describe('server API', () => {
     expect(explainer.sections.length).toBeGreaterThan(0);
   }, 60_000);
 
+  it('compares a branch against the base it was asked for, and says so when they are the same', async () => {
+    if (!fixture.hasGit) return;
+    const history = await getJson<{ branches: { name: string; current: boolean }[] }>(`/api/repos/${repoId}/history?limit=5`);
+    const current = history.branches.find((branch) => branch.current)?.name;
+    if (!current) return;
+
+    // A branch compared with itself is the degenerate case that used to reach the
+    // model and come back as an explainer about nothing.
+    const response = await fetch(`${server.url}/api/repos/${repoId}/change`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'branch', branch: current, base: current }),
+    });
+    expect(response.ok).toBe(true);
+    const body = (await response.json()) as {
+      change: { files: unknown[]; subtitle?: string; compare?: { mode: string; baseRef: string; note?: string } };
+    };
+    expect(body.change.files).toEqual([]);
+    expect(body.change.compare?.baseRef).toBe(current);
+    expect(body.change.subtitle).toContain('Same commit');
+    expect(body.change.compare?.note).toContain('point at the same commit');
+  }, 60_000);
+
+  it('explains an empty comparison without asking the model', async () => {
+    if (!fixture.hasGit) return;
+    const history = await getJson<{ branches: { name: string; current: boolean }[] }>(`/api/repos/${repoId}/history?limit=5`);
+    const current = history.branches.find((branch) => branch.current)?.name;
+    if (!current) return;
+
+    const events = await collectSse(`${server.url}/api/repos/${repoId}/change/explain`, {
+      kind: 'branch',
+      branch: current,
+      base: current,
+    });
+    const explainer = events.find((event) => event.type === 'explainer')?.explainer as {
+      tldr: string;
+      model: string;
+      sections: { type: string }[];
+    };
+    expect(explainer.model).toBe('static-analysis');
+    expect(explainer.tldr).toContain('point at the same commit');
+    expect(explainer.sections.some((section) => section.type === 'callout')).toBe(true);
+  }, 60_000);
+
+  it('rejects an unknown branch comparison mode', async () => {
+    const response = await fetch(`${server.url}/api/repos/${repoId}/change`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'branch', branch: 'main', compare: 'sideways' }),
+    });
+    expect(response.status).toBe(400);
+  }, 30_000);
+
   it('writes credentials to .env, never to config.json, and never echoes them', async () => {
     const before = await getJson<{ settings: { credentials: { openai: string } }; configPath: string }>('/api/settings');
     expect(before.settings.credentials.openai).toBe('none');

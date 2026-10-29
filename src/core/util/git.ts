@@ -259,24 +259,53 @@ export async function listCommits(root: string, opts: { limit?: number; ref?: st
     });
 }
 
+/**
+ * The field separator used when asking git for several values per line.
+ *
+ * `git log --format` writes `%x1f` for a control character; `git for-each-ref`
+ * does not understand that spelling and emits the four characters literally. It
+ * does understand `%1f` — the bare hex form — so ref listings use that and
+ * `git log` listings keep `%x1f`. Getting this wrong is not a cosmetic problem:
+ * every branch name came back as `feature%x1f9f2c1ab%x1f2024-06-01…`, nothing
+ * resolved when it was passed back to git, and the reader was told the branch held
+ * no changes.
+ */
+const REF_FIELD = '%1f';
+
+/** Parse records written with {@link REF_FIELD}, dropping anything malformed. */
+function parseRefLines(stdout: string, fields: number): string[][] {
+  return stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.split('\u001f'))
+    // A row that did not split cleanly would otherwise become a "branch" called
+    // by its own field string, which then fails every git call it is used in.
+    .filter((parts) => parts.length >= fields && parts[0].length > 0 && !parts[0].includes('%'));
+}
+
 export async function listBranches(root: string): Promise<{ name: string; current: boolean; lastCommit: string; subject: string; date: string }[]> {
   const res = await runGit(
-    ['for-each-ref', '--sort=-committerdate', '--count=40', '--format=%(refname:short)%x1f%(objectname:short)%x1f%(committerdate:iso8601)%x1f%(subject)', 'refs/heads', 'refs/remotes'],
+    [
+      'for-each-ref',
+      '--sort=-committerdate',
+      '--count=40',
+      `--format=%(refname:short)${REF_FIELD}%(objectname:short)${REF_FIELD}%(committerdate:iso8601)${REF_FIELD}%(subject)`,
+      'refs/heads',
+      'refs/remotes',
+    ],
     root,
     { timeoutMs: 20_000 },
   );
   if (res.code !== 0) return [];
   const info = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], root, { timeoutMs: 10_000 });
   const current = info.code === 0 ? info.stdout.trim() : '';
-  return res.stdout
-    .trim()
-    .split('\n')
-    .filter(Boolean)
-    .filter((line) => !line.endsWith('/HEAD'))
-    .map((line) => {
-      const [name, lastCommit, date, subject] = line.split('\x1f');
-      return { name, current: name === current, lastCommit, date, subject: subject ?? '' };
-    });
+  return parseRefLines(res.stdout, 4)
+    // `origin/HEAD` is a symbolic alias for `origin/main`, not a branch of its
+    // own, and offering it duplicates the default branch under a name that is
+    // confusing to compare against.
+    .filter(([name]) => !name.endsWith('/HEAD'))
+    .map(([name, lastCommit, date, subject]) => ({ name, current: name === current, lastCommit, date, subject: subject ?? '' }));
 }
 
 /* ------------------------------------------------------------------ *
@@ -435,10 +464,22 @@ function countDiffLines(patch: string, prefix: string): number {
   return n;
 }
 
+/**
+ * Two ways to read a branch, and they answer different questions.
+ *
+ * `since-diverged` diffs the merge base with the branch tip — only the work the
+ * branch itself did. `against-tip` diffs the base branch's current tip with the
+ * branch's current tip, which also includes everything the base gained since the
+ * branch left it (shown as reversals). The first is the better answer to "what is
+ * this branch about"; the second is the only answer that produces anything once
+ * the branch has been merged back.
+ */
+export type BranchCompareMode = 'since-diverged' | 'against-tip';
+
 export type ChangeSpec =
   | { kind: 'commit'; sha: string }
   | { kind: 'range'; base: string; head: string; label?: string }
-  | { kind: 'branch'; branch: string; base?: string }
+  | { kind: 'branch'; branch: string; base?: string; compare?: BranchCompareMode }
   | { kind: 'pr'; number: number; owner?: string; repo?: string }
   | { kind: 'working' };
 
@@ -450,7 +491,10 @@ export async function buildChange(root: string, spec: ChangeSpec): Promise<Chang
     const files = await workingChanges(root);
     const commits = await listCommits(root, { limit: 1 });
     return {
-      id: `working-${shortHash(`${Date.now()}`)}`,
+      // Stable while the working tree is stable: the same uncommitted edits keep
+      // the same id, so a second look reuses the explainer instead of piling up
+      // a new file (and a fresh model run) every time.
+      id: `working-${shortHash(files.map((file) => `${file.path}:${file.additions}:${file.deletions}`).join('|') || 'clean')}`,
       kind: 'working',
       title: 'Uncommitted changes',
       subtitle: `Working tree on ${headRef}`,
@@ -464,18 +508,22 @@ export async function buildChange(root: string, spec: ChangeSpec): Promise<Chang
   }
 
   if (spec.kind === 'commit') {
-    const meta = await runGit(['show', '-s', `--format=${LOG_FORMAT}`, spec.sha], root, { timeoutMs: 20_000 });
+    const commitSha = await revParseRef(root, spec.sha);
+    if (!commitSha) {
+      throw Object.assign(new Error(`No commit called "${spec.sha}" in this repository.`), { statusCode: 400 });
+    }
+    const meta = await runGit(['show', '-s', `--format=${LOG_FORMAT}`, commitSha], root, { timeoutMs: 20_000 });
     const [sha, short, author, email, date, subject, body] = meta.stdout.trim().split('\x1f');
-    const parentRes = await runGit(['rev-parse', '--verify', '--quiet', `${spec.sha}^`], root, { timeoutMs: 10_000 });
+    const parentRes = await runGit(['rev-parse', '--verify', '--quiet', `${commitSha}^`], root, { timeoutMs: 10_000 });
     const base = parentRes.code === 0 ? parentRes.stdout.trim() : EMPTY_TREE;
-    const files = await diffFilesBetween(root, base, spec.sha);
+    const files = await diffFilesBetween(root, base, commitSha);
     return {
-      id: `commit-${sha || spec.sha}`,
+      id: `commit-${commitSha}`,
       kind: 'commit',
       title: subject || short || spec.sha,
       subtitle: `${short} · ${author}`,
       base,
-      head: sha || spec.sha,
+      head: commitSha,
       author,
       date,
       commits: [{ sha, short, author, email, date, subject, body: (body ?? '').trim() }],
@@ -486,17 +534,74 @@ export async function buildChange(root: string, spec: ChangeSpec): Promise<Chang
   }
 
   if (spec.kind === 'branch') {
-    const base = spec.base ?? (await detectDefaultBranch(root)) ?? 'HEAD~20';
-    const mergeBase = await runGit(['merge-base', base, spec.branch], root, { timeoutMs: 20_000 });
-    const actualBase = mergeBase.code === 0 ? mergeBase.stdout.trim() : base;
-    const files = await diffFilesBetween(root, actualBase, spec.branch);
-    const commits = await listCommits(root, { limit: 100, ref: `${actualBase}..${spec.branch}` });
+    const explicitBase = spec.base?.trim() || '';
+    let baseRef = explicitBase || (await detectDefaultBranch(root)) || 'HEAD~20';
+    const branchTip = await revParseRef(root, spec.branch);
+    // A name that does not resolve must be an error, not an empty comparison.
+    // Passing a garbled branch name to `git diff` used to leave the file list
+    // empty and the reader looking at an explainer that said nothing happened.
+    if (!branchTip) {
+      throw Object.assign(new Error(`No branch or revision called "${spec.branch}" in this repository.`), { statusCode: 400 });
+    }
+
+    let baseTip = await revParseRef(root, baseRef);
+    if (!baseTip && !explicitBase) {
+      // No default branch could be detected and `HEAD~20` is past the start of a
+      // short history: compare against the branch's own first commit instead of
+      // giving up.
+      const rootCommit = await runGit(['rev-list', '--max-parents=0', spec.branch], root, { timeoutMs: 20_000 });
+      const first = rootCommit.stdout.trim().split('\n')[0] ?? '';
+      if (rootCommit.code === 0 && first) {
+        baseRef = first;
+        baseTip = first;
+      }
+    }
+    if (!baseTip) {
+      throw Object.assign(new Error(`Cannot compare against "${baseRef}": no such branch or revision.`), { statusCode: 400 });
+    }
+
+    const mergeBaseRes = await runGit(['merge-base', baseRef, spec.branch], root, { timeoutMs: 20_000 });
+    const mergeBase = mergeBaseRes.code === 0 ? mergeBaseRes.stdout.trim() || null : null;
+
+    // A branch that is already merged into the base — or that is simply the base
+    // — has the same tip as its merge base, so the merge-base diff is empty. The
+    // reader then gets an explainer about "no changes", which is the least
+    // useful thing we can say about a branch they just asked about. Fall back to
+    // comparing the two tips, which always has something to show, and say so.
+    const sameTip = branchTip === baseTip;
+    const noOwnCommits = mergeBase === branchTip;
+    const requested: BranchCompareMode = spec.compare ?? 'since-diverged';
+    const mode: BranchCompareMode = requested === 'against-tip' || noOwnCommits || sameTip ? 'against-tip' : 'since-diverged';
+    const diffBase = mode === 'against-tip' ? baseTip : (mergeBase ?? baseTip);
+
+    const files = await diffFilesBetween(root, diffBase, spec.branch);
+    const commits = await listCommits(root, { limit: 100, ref: `${diffBase}..${spec.branch}` });
+
+    let note: string | undefined;
+    if (sameTip) {
+      note = `${spec.branch} and ${baseRef} point at the same commit, so there is nothing between them. Pick a different comparison branch, or check the branches you expected to differ.`;
+    } else if (noOwnCommits) {
+      note = `${spec.branch} has no commits that ${baseRef} does not already contain, so there is nothing of its own to show. This compares the two branch tips instead — everything that differs now, including what ${baseRef} gained after the branch left it.`;
+    } else if (requested === 'against-tip') {
+      note = `Comparing the two branch tips: the diff also includes what ${baseRef} gained since the branch diverged, which appears as reversals.`;
+    }
+
+    const subtitle =
+      mode === 'since-diverged'
+        ? `${pluralizeCommits(commits.length)} ahead of ${baseRef}`
+        : sameTip
+          ? `Same commit as ${baseRef}`
+          : noOwnCommits
+            ? `Already merged into ${baseRef} — comparing the two tips`
+            : `Tip-to-tip comparison with ${baseRef}`;
+
     return {
-      id: `branch-${spec.branch}-${shortHash(actualBase).slice(0, 8)}`,
+      id: `branch-${spec.branch}-${mode}-${shortHash(`${diffBase}..${branchTip}`).slice(0, 8)}`,
       kind: 'branch',
       title: `Branch ${spec.branch}`,
-      subtitle: `${commits.length} commit(s) ahead of ${base}`,
-      base: actualBase,
+      subtitle,
+      compare: { mode, baseRef, note },
+      base: diffBase,
       head: spec.branch,
       commits,
       files,
@@ -512,8 +617,15 @@ export async function buildChange(root: string, spec: ChangeSpec): Promise<Chang
   }
 
   // range
-  const files = await diffFilesBetween(root, spec.base, spec.head);
-  const commits = await listCommits(root, { limit: 100, ref: `${spec.base}..${spec.head}` });
+  const [baseSha, headSha] = await Promise.all([revParseRef(root, spec.base), revParseRef(root, spec.head)]);
+  if (!baseSha || !headSha) {
+    const missing = !baseSha ? spec.base : spec.head;
+    throw Object.assign(new Error(`Cannot compare ${spec.base} with ${spec.head}: no branch or revision called "${missing}".`), {
+      statusCode: 400,
+    });
+  }
+  const files = await diffFilesBetween(root, baseSha, headSha);
+  const commits = await listCommits(root, { limit: 100, ref: `${baseSha}..${headSha}` });
   return {
     id: `range-${shortHash(`${spec.base}..${spec.head}`).slice(0, 10)}`,
     kind: 'range',
@@ -583,6 +695,18 @@ export async function listChangedFiles(root: string, ref: string): Promise<strin
   const res = await runGit(['diff', '--name-only', '-M', ref], root, { timeoutMs: 30_000 });
   if (res.code !== 0) return [];
   return res.stdout.trim().split('\n').filter(Boolean).map(toPosix);
+}
+
+function pluralizeCommits(count: number): string {
+  return `${count} commit${count === 1 ? '' : 's'}`;
+}
+
+/** Resolve any revision to a full commit sha, or null when it does not exist. */
+export async function revParseRef(root: string, ref: string): Promise<string | null> {
+  if (!ref || ref.startsWith('-')) return null;
+  const res = await runGit(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], root, { timeoutMs: 10_000 });
+  const sha = res.stdout.trim();
+  return res.code === 0 && sha ? sha : null;
 }
 
 export { EMPTY_TREE };

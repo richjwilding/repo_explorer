@@ -355,6 +355,16 @@ Begin. Investigate first, then write the explainer.`;
 }
 
 /** Seed block for a change, used as the agent's starting context. */
+export function describeComparison(change: Change): string {
+  const compare = change.compare;
+  if (!compare) return '';
+  const scope =
+    compare.mode === 'since-diverged'
+      ? `only the commits ${change.head} added since it diverged from ${compare.baseRef}`
+      : `the two branch tips as they are now (so changes ${compare.baseRef} gained since the branch left it appear as reversals)`;
+  return `${scope}${compare.note ? ` — ${compare.note}` : ''}`;
+}
+
 export function changeSeed(change: Change, diff: string, history: string): string {
   const commits = change.commits
     .slice(0, 25)
@@ -367,6 +377,7 @@ Kind: ${change.kind}
 Title: ${change.title}
 ${change.subtitle ? `Subtitle: ${change.subtitle}` : ''}
 Base: ${change.base} → Head: ${change.head}
+${change.compare ? `Comparison: ${describeComparison(change)}` : ''}
 Stats: ${change.stats.files} files changed, +${change.stats.additions} / -${change.stats.deletions}
 ${change.author ? `Author: ${change.author}` : ''}
 

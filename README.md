@@ -623,7 +623,7 @@ did not draw.
 - **Overview → Explainer** — the progressive explainer, with drill-down cards that generate child explainers, plus an export button.
 - **Overview → Architecture** — components (with a toggle for supporting components), detected endpoints, churn hotspots, possibly-unreachable code, an inventory of what the system depends on (with provenance), entrypoints, and the codebase's vocabulary.
 - **Chat** — streaming answers with clickable citations, saved conversations, and starter questions derived from the analysis.
-- **Changes** — recent commits, branch comparison, and the working tree. Each one loads the diff and produces a change explainer plus a hunk-level diff viewer.
+- **Changes** — recent commits, branch comparison, and the working tree. Each one loads the diff and produces a change explainer plus a hunk-level diff viewer. A branch can be read two ways: its own commits since it diverged from the base (the default, and the better answer to "what is this branch about"), or its tip against the base tip. The second is used automatically when the first would be empty — a branch that is already merged has no commits of its own, and saying so with an empty diff is how that used to be reported.
 - **Export HTML** — writes a self-contained file to `~/RepoExplorer` that includes the first three *deeper* explainers as full sections, so "Where to go next" links actually work offline. Nested explainers are served from cache when you have already opened them.
 - **Files** — file tree, symbol search (with caller counts), full-text search, and a code viewer that shows *callers* and *callees* for any symbol.
 
